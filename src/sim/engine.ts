@@ -83,8 +83,17 @@ export const DEFAULT_PARAMS: SimParams = {
   pressureEvery: 1,
 };
 
-/** 每个单元格占据的像素边长（渲染分辨率 = 网格 × CELL）。【测试配置】8 配 64×64 网格 */
-export const CELL = 8;
+/** 画布内部渲染尺寸的目标边长（像素）：网格×每格像素 ≈ 这个数，与网格无关 */
+export const RENDER_PX = 1024;
+
+/**
+ * 每格占几个像素 = RENDER_PX / 网格较长边（至少 1）。
+ * 由"画布内部渲染尺寸恒定"反推得来：网格越细，每格画的像素越少。显示尺寸本来就跟着面板走，
+ * 把每格写死成固定像素只是白白多写几倍像素、再让浏览器缩回去（256×256 时是 16 MB/帧）。
+ */
+function cellSizeFor(w: number, h: number): number {
+  return Math.max(1, Math.floor(RENDER_PX / Math.max(w, h)));
+}
 
 /** 渲染时认为是“空格”的质量阈值 */
 export const RENDER_EMPTY_EPS = 0.01;
@@ -140,6 +149,8 @@ function edgeFlow(F: number, mi: number, mj: number, flowScale: number): number 
 export class FluidEngine {
   readonly w: number;
   readonly h: number;
+  /** 每格占几个像素（画布内部渲染分辨率 = 网格 × cell） */
+  readonly cell: number;
 
   /** 液体质量场 */
   readonly mass: Float32Array;
@@ -174,6 +185,7 @@ export class FluidEngine {
   constructor(w: number, h: number) {
     this.w = w;
     this.h = h;
+    this.cell = cellSizeFor(w, h);
     const n = w * h;
     this.mass = new Float32Array(n);
     this.wall = new Uint8Array(n);
@@ -448,10 +460,10 @@ export class FluidEngine {
   // ------------------------------------------------------------------
 
   get pixelWidth(): number {
-    return this.w * CELL;
+    return this.w * this.cell;
   }
 
   get pixelHeight(): number {
-    return this.h * CELL;
+    return this.h * this.cell;
   }
 }
