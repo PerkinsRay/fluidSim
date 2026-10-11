@@ -17,9 +17,9 @@ export const TOOLS: { key: Tool; label: string; hotkey: string }[] = [
 ];
 
 /** 网格分辨率的默认值与可选范围（每边格数，方形网格） */
-export const DEFAULT_GRID = 128;
+export const DEFAULT_GRID = 64;
 export const GRID_MIN = 8;
-export const GRID_MAX = 128;
+export const GRID_MAX = 256;
 export const GRID_STEP = 8;
 
 /** 按网格边长新建一台引擎（参数用默认值；切分辨率时由 UI 覆盖成当前值） */

@@ -6,7 +6,7 @@
  * 越稀越透，最后溶进画布背景（#0A101C）。
  */
 
-import { CELL, RENDER_EMPTY_EPS, FluidEngine } from './engine';
+import { RENDER_EMPTY_EPS, FluidEngine } from './engine';
 import { applyPreset } from './presets';
 import type { PresetKey } from './presets';
 
@@ -152,6 +152,7 @@ export function renderEngine(
   timeMs: number,
 ): void {
   const { w, h, mass, wall } = engine;
+  const CELL = engine.cell; // 每格几个像素：由画布内部渲染尺寸反推，见 engine.ts
   const pw = w * CELL;
 
   let px = pixelCache.get(image);
@@ -206,6 +207,7 @@ function drawSources(
   timeMs: number,
 ): void {
   const { w, h, wall, source } = engine;
+  const CELL = engine.cell;
 
   // 水源格：脉动青色圆点（叠加在像素画面上）
   const pulse = 0.55 + 0.45 * Math.sin(timeMs / 300);
