@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* 深色实验室主题（design.md §4，本站仅深色） */
+    --background: 221 48% 5%;        /* #070B14 abyss */
+    --foreground: 214 32% 91%;       /* #E2E8F0 slate-200 */
+    --card: 218 42% 9%;              /* #0D1420 panel */
+    --card-foreground: 214 32% 91%;
+    --popover: 218 42% 9%;
+    --popover-foreground: 214 32% 91%;
+    --primary: 188 86% 53%;          /* #22D3EE cyan-400 */
+    --primary-foreground: 221 48% 5%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 214 32% 91%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 216 19% 57%; /* #7C8DA6 */
+    --accent: 217 33% 17%;
+    --accent-foreground: 214 32% 91%;
+    --destructive: 351 95% 71%;      /* #FB7185 rose-400 */
+    --destructive-foreground: 221 48% 5%;
+    --border: 215 25% 27%;
+    --input: 215 25% 27%;
+    --ring: 188 86% 53%;
+    --radius: 0.625rem;
+    --sidebar-background: 218 42% 9%;
+    --sidebar-foreground: 214 32% 91%;
+    --sidebar-primary: 188 86% 53%;
+    --sidebar-primary-foreground: 221 48% 5%;
+    --sidebar-accent: 217 33% 17%;
+    --sidebar-accent-foreground: 214 32% 91%;
+    --sidebar-border: 215 25% 27%;
+    --sidebar-ring: 188 86% 53%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-abyss text-foreground font-sans antialiased;
+    /* blueprint 工程网格背景（design.md S3.4），格距 40px */
+    background-image:
+      linear-gradient(rgba(148, 163, 184, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148, 163, 184, 0.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  ::selection {
+    background: rgba(34, 211, 238, 0.3);
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #070b14;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.25);
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.4);
+  }
+}
+
+@layer components {
+  /* 快捷键提示 kbd 样式（home.md 交互总表） */
+  .kbd {
+    @apply font-mono text-[10px] bg-white/5 border border-subtle rounded px-1;
+  }
+}
+
+@layer base {
+  /* 降级： prefers-reduced-motion 时关闭持续动画与平滑滚动 */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
