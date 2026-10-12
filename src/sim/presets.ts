@@ -2,7 +2,7 @@
  * 场景预设：在引擎中预置墙体与液体的演示布局。
  */
 
-import { FluidEngine } from './engine';
+import { FluidEngine, CELL_WALL, CELL_SOURCE } from './engine';
 
 export type PresetKey = 'blank' | 'dam' | 'twin' | 'rain' | 'hourglass';
 
@@ -29,15 +29,15 @@ function fillRect(e: FluidEngine, x0: number, y0: number, x1: number, y1: number
 
 function wallRect(e: FluidEngine, x0: number, y0: number, x1: number, y1: number) {
   fillRect(e, x0, y0, x1, y1, (i) => {
-    e.wall[i] = 1;
+    e.kind[i] = CELL_WALL;
     e.mass[i] = 0;
-    e.source[i] = 0;
   });
 }
 
-function liquidRect(e: FluidEngine, x0: number, y0: number, x1: number, y1: number, amount = 3) {
+/** 液体按静止密度 m₀ 填入：高于 m₀ 的部分会在第 0 步被压力弹开（c 大时表现为炸开） */
+function liquidRect(e: FluidEngine, x0: number, y0: number, x1: number, y1: number, amount = Math.max(e.params.restDensity, 0.1)) {
   fillRect(e, x0, y0, x1, y1, (i) => {
-    if (!e.wall[i]) e.mass[i] = amount;
+    if (e.kind[i] !== CELL_WALL) e.mass[i] = amount;
   });
 }
 
@@ -53,7 +53,7 @@ function dam(e: FluidEngine) {
   // 坝体（底部 6 格留出缺口）
   wallRect(e, damX, Math.floor(e.h * 0.25), damX + 1, e.h - 9);
   // 库区水体
-  liquidRect(e, 3, Math.floor(e.h * 0.3), damX - 2, e.h - 4, 3);
+  liquidRect(e, 3, Math.floor(e.h * 0.3), damX - 2, e.h - 4);
   // 左侧挡墙
   wallRect(e, 0, Math.floor(e.h * 0.25), 1, e.h - 3);
 }
@@ -69,7 +69,7 @@ function twin(e: FluidEngine) {
   // 中间隔板（底部留 4 格连通口）
   wallRect(e, mid, top, mid + 1, e.h - 7);
   // 左箱水体
-  liquidRect(e, 4, top + 2, mid - 1, e.h - 4, 3);
+  liquidRect(e, 4, top + 2, mid - 1, e.h - 4);
 }
 
 /** 倾盆之雨：顶部一排水源，下方若干障碍平台 */
@@ -79,7 +79,7 @@ function rain(e: FluidEngine) {
   // 顶部水源带
   for (let x = Math.floor(w * 0.15); x <= Math.floor(w * 0.85); x += 2) {
     const i = 2 * w + x;
-    e.source[i] = 1;
+    if (e.kind[i] !== CELL_WALL) e.kind[i] = CELL_SOURCE;
   }
   // 障碍平台
   wallRect(e, Math.floor(w * 0.2), Math.floor(h * 0.45), Math.floor(w * 0.42), Math.floor(h * 0.45) + 1);
@@ -106,7 +106,7 @@ function hourglass(e: FluidEngine) {
   wallRect(e, mid - halfTop - 2, Math.floor(h * 0.08), mid - halfTop - 1, Math.floor(h * 0.2));
   wallRect(e, mid + halfTop + 1, Math.floor(h * 0.08), mid + halfTop + 2, Math.floor(h * 0.2));
   // 上容器中的液体
-  liquidRect(e, mid - halfTop + 2, Math.floor(h * 0.12), mid + halfTop - 2, Math.floor(h * 0.3), 2.5);
+  liquidRect(e, mid - halfTop + 2, Math.floor(h * 0.12), mid + halfTop - 2, Math.floor(h * 0.3));
   // 下容器
   const y0 = Math.floor(h * 0.72);
   wallRect(e, mid - halfTop - 2, y0, mid - halfTop - 1, h - 3);

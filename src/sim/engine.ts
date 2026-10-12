@@ -70,6 +70,20 @@ export interface SimParams {
    * 0.5 ≈ 原各向同性行为；1 或更大 = 液柱更硬、液面上方雾状水汽更厚。
    */
   selfBase: number;
+  /**
+   * 撞墙反弹系数 0..1（试验引擎用）：墙只给力、不改速度——水冲向墙时，贴墙格
+   * 额外受到冲击压力 2·wallBounce·m·v²。0 = 只有普通压力；1 = 完全反射的冲击力。
+   */
+  wallBounce: number;
+  /**
+   * 内聚拉力 0..1（试验引擎用）：双井势 p = A·u(1−u)(1−2u) 中 u > 0.5 的拉力瓣，
+   * A = tension × 20 × m₀。0 = 关闭。
+   */
+  tension: number;
+  /**
+   * 稀相推力 0..1（试验引擎用）：双井势中 u < 0.5 的推力瓣，A = thinPush × 20 × m₀。0 = 关闭。
+   */
+  thinPush: number;
 }
 
 export const DEFAULT_PARAMS: SimParams = {
@@ -77,10 +91,14 @@ export const DEFAULT_PARAMS: SimParams = {
   elasticity: 999,
   viscosity: 0.1,
   gravity: 1.0,
-  expansion: 0.1,
+  // 试验引擎里是压力系数 c 的 1/100（见 engineSimple 的 C_SCALE）：2 → c = 200
+  expansion: 2,
   selfBase: 1.0,
   restDensity: 1,
   pressureEvery: 1,
+  wallBounce: 0,
+  tension: 0,
+  thinPush: 0,
 };
 
 /** 画布内部渲染尺寸的目标边长（像素）：网格×每格像素 ≈ 这个数，与网格无关 */
@@ -94,6 +112,11 @@ export const RENDER_PX = 1024;
 function cellSizeFor(w: number, h: number): number {
   return Math.max(1, Math.floor(RENDER_PX / Math.max(w, h)));
 }
+
+/** 格子类型（FluidEngine.kind 的取值）：水源本身也是能装水的格，只是每步额外注水 */
+export const CELL_FLUID = 0;
+export const CELL_WALL = 1;
+export const CELL_SOURCE = 2;
 
 /** 渲染时认为是“空格”的质量阈值 */
 export const RENDER_EMPTY_EPS = 0.01;
@@ -154,10 +177,8 @@ export class FluidEngine {
 
   /** 液体质量场 */
   readonly mass: Float32Array;
-  /** 固体墙标记 */
-  readonly wall: Uint8Array;
-  /** 水源标记：每步向该格注入液体 */
-  readonly source: Uint8Array;
+  /** 格子类型：CELL_FLUID（可装水）/ CELL_WALL（固体墙）/ CELL_SOURCE（每步注水的格，本身也可装水） */
+  readonly kind: Uint8Array;
   /** 四方向压力缓存 [上, 下, 左, 右] × 每格（规则1/3 的输出） */
   readonly pressure: Float32Array;
 
@@ -169,13 +190,15 @@ export class FluidEngine {
   private netPH: Float32Array;
   /** 下一帧压力场的重建缓冲（阻尼传递的目标） */
   private pressureNext: Float32Array;
+  /** 本笔已经画过水的格（一笔里每格只加一次） */
+  private strokeMask: Uint8Array;
   /** 每格静止比例（流动卸压，低通平滑后的 1 − 流出量/m） */
   private still: Float32Array;
 
   params: SimParams = { ...DEFAULT_PARAMS };
   stepCount = 0;
   /** 水源每步注入量 */
-  sourceRate = 0.35;
+  sourceRate = 3.35;
   /**
    * 松弛因子 ω：Jacobi 式同步更新的欠松弛系数（<1 抑制刚性耦合导致的振荡，
    * 保证平衡后趋于静止）。属于数值求解细节，不改变三条规则的语义。
@@ -188,20 +211,19 @@ export class FluidEngine {
     this.cell = cellSizeFor(w, h);
     const n = w * h;
     this.mass = new Float32Array(n);
-    this.wall = new Uint8Array(n);
-    this.source = new Uint8Array(n);
+    this.kind = new Uint8Array(n); // 全部 CELL_FLUID
     this.pressure = new Float32Array(n * 4);
     this.flow = new Float32Array(n * 2);
     this.netP = new Float32Array(n);
     this.netPH = new Float32Array(n);
     this.pressureNext = new Float32Array(n * 4);
+    this.strokeMask = new Uint8Array(n);
     this.still = new Float32Array(n).fill(1);
   }
 
   clear(): void {
     this.mass.fill(0);
-    this.wall.fill(0);
-    this.source.fill(0);
+    this.kind.fill(CELL_FLUID);
     this.pressure.fill(0);
     this.flow.fill(0);
     this.netP.fill(0);
@@ -240,7 +262,7 @@ export class FluidEngine {
    * → 墙体反射 → 第二遍：边流量（规则2）→ 应用流量。
    */
   private substep(flowScale: number, inject: boolean, refreshPressure: boolean): void {
-    const { w, h, mass, wall, pressure, flow, netP, netPH, still } = this;
+    const { w, h, mass, kind, pressure, flow, netP, netPH, still } = this;
     const { elasticity, gravity, expansion, selfBase, restDensity } = this.params;
     const k = Math.max(elasticity, 1e-6);
     const beta = Math.max(expansion, 0);
@@ -257,9 +279,8 @@ export class FluidEngine {
 
     // ---- 水源注入 ----
     if (inject) {
-      const src = this.source;
-      for (let i = 0; i < src.length; i++) {
-        if (src[i] && !wall[i]) mass[i] += this.sourceRate;
+      for (let i = 0; i < kind.length; i++) {
+        if (kind[i] === CELL_SOURCE) mass[i] += this.sourceRate;
       }
     }
 
@@ -267,93 +288,93 @@ export class FluidEngine {
     // refreshPressure = false 时整段跳过：压力场保持上一次解算的结果，
     // 质量照常流动（力的传播速度因此降为 1/K，作用距离不变）。
     if (refreshPressure) {
-    // pressure[i*4+d] = 方向 d 上的邻居上一步推向本格的压力（跨帧持久）。
-    // netP[i] = 竖直面压力（上下两面），netPH[i] = 水平面压力（左右两面），都含固有膨胀；
-    // 向下的输出 = netP + m·g。
-    // 推给邻居的压力另乘阻尼 damp 与静止比例（流动卸压），不影响流量的驱动力。
-    const next = this.pressureNext;
-    // 反馈回路增益 = ρ·damp ≤ 0.97 < 1，任意弹性系数下压力场都收敛不振荡
-    const damp = FEEDBACK_DAMP;
-    next.fill(0);
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        const i = row + x;
-        if (wall[i]) {
-          netP[i] = 0;
-          netPH[i] = 0;
-          continue;
+      // pressure[i*4+d] = 方向 d 上的邻居上一步推向本格的压力（跨帧持久）。
+      // netP[i] = 竖直面压力（上下两面），netPH[i] = 水平面压力（左右两面），都含固有膨胀；
+      // 向下的输出 = netP + m·g。
+      // 推给邻居的压力另乘阻尼 damp 与静止比例（流动卸压），不影响流量的驱动力。
+      const next = this.pressureNext;
+      // 反馈回路增益 = ρ·damp ≤ 0.97 < 1，任意弹性系数下压力场都收敛不振荡
+      const damp = FEEDBACK_DAMP;
+      next.fill(0);
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const i = row + x;
+          if (kind[i] === CELL_WALL) {
+            netP[i] = 0;
+            netPH[i] = 0;
+            continue;
+          }
+          const pi = i * 4;
+          const m = mass[i];
+          // 收到的压力全部来自压力场（邻居输出、上方自重、墙体 / 边界反射）。
+          const hasMass = m > EMPTY_EPS;
+          // 对冲交叉传递：竖向对冲 → 推左右；横向对冲 → 推上下。
+          // 每格自身质量也算一份压力（selfBase·m·g）叠加到上方来压上——否则液面处竖向对冲为 0、压力链断开。
+          // 竖直通道取对冲（min）而不是平均：下落的水团上下不平衡（pU ≫ pD），
+          // 取平均会把这份自重不平衡泄漏到侧向、把水团撑开（BUG2 会回来）。
+          const vert = Math.min(pressure[pi] + selfBase * gravity * m * still[i], pressure[pi + 1]);
+          const horz = Math.min(pressure[pi + 2], pressure[pi + 3]);
+          // 静止密度：低于 m₀ 的格不施反作用力，也不自发膨胀（固有膨胀同样按比例衰减），
+          // 只保留自重——稀薄的水既不会回推、也不会把自己撑开，于是失去支撑、落回水体。
+          // 用连续斜坡而不是硬阈值，避免格子在阈值两侧来回跳。
+          const react =
+            restDensity > 0 ? Math.min(1, Math.max(0, (m - restHalf) * restInv)) : 1;
+          const intrinsic = hasMass ? m * betaQuarter * react : 0;
+          netP[i] = rho * horz * react + intrinsic; // 竖直面压力（上下）
+          netPH[i] = rho * vert * react + intrinsic; // 水平面压力（左右）
+          // 只有含物质的格才向外施压；空格不传递压力（自由液面压力为 0）
+          if (!hasMass) continue;
+          // 流动卸压：正在流动的那部分液体把压力转化成了运动，不再向四周施压。
+          // 静止比例 = 1 − 上一步流出量/m（只计流出，流入不计），四个方向的输出压力
+          // （含向下的自重）统一乘以它。
+          // 自由下落的水团整体在流动 → 几乎不施压 → 侧向无推力，不散开；
+          // 静止水柱不流动 → 全部压力传下去 → 池底压力大、向两侧摊开。
+          // 低通平滑：直接用 1 − 流出量/m 会形成"流动→卸压→不流→加压→流动"
+          // 的逐步反馈，单格质量一步大一步小地来回跳（闪烁）。平滑后卸压随流动渐进生效。
+          // 只统计流出量（流入不计）。flow 边的正方向是 左→右 / 上→下：
+          // 右、下两条边 >0 表示本格流出；左、上两条边 <0 表示本格流出（取反变正）。
+          let moved = 0;
+          if (flow[i * 2] > 0) moved += flow[i * 2]; // 流向右邻
+          if (flow[i * 2 + 1] > 0) moved += flow[i * 2 + 1]; // 流向下邻
+          if (x > 0 && flow[(i - 1) * 2] < 0) moved += -flow[(i - 1) * 2]; // 流向左邻
+          if (y > 0 && flow[(i - w) * 2 + 1] < 0) moved += -flow[(i - w) * 2 + 1]; // 流向上邻
+          still[i] += (Math.max(0, 1 - moved / m) - still[i]) * STILL_SMOOTHING;
+          const s = still[i];
+          const outV = (rho * horz * react * damp + intrinsic) * s; // 竖直面输出（上、下）
+          const outH = (rho * vert * react * damp + intrinsic) * s; // 水平面输出（左、右）
+          const outDown = outV + gravity * m * s; // 向下再加自重
+          // 直接推向四邻，不判断墙体：推进墙格的压力由下方「墙体反射」阶段原样退回。
+          // 域边界外没有格子可写，视为刚性面直接弹回本格。
+          if (y > 0) next[(i - w) * 4 + 1] += outV; // 上邻收到来自下方的输出
+          else next[pi] += outV;
+          if (y < h - 1) next[(i + w) * 4] += outDown; // 下邻收到来自上方的输出 + 自重
+          else next[pi + 1] += outDown; // 底边界：连同自重一起弹回
+          if (x > 0) next[(i - 1) * 4 + 3] += outH; // 左邻收到来自右方的输出
+          else next[pi + 2] += outH;
+          if (x < w - 1) next[(i + 1) * 4 + 2] += outH; // 右邻收到来自左方的输出
+          else next[pi + 3] += outH;
         }
-        const pi = i * 4;
-        const m = mass[i];
-        // 收到的压力全部来自压力场（邻居输出、上方自重、墙体 / 边界反射）。
-        const hasMass = m > EMPTY_EPS;
-        // 对冲交叉传递：竖向对冲 → 推左右；横向对冲 → 推上下。
-        // 每格自身质量也算一份压力（selfBase·m·g）叠加到上方来压上——否则液面处竖向对冲为 0、压力链断开。
-        // 竖直通道取对冲（min）而不是平均：下落的水团上下不平衡（pU ≫ pD），
-        // 取平均会把这份自重不平衡泄漏到侧向、把水团撑开（BUG2 会回来）。
-        const vert = Math.min(pressure[pi] + selfBase * gravity * m * still[i], pressure[pi + 1]);
-        const horz = Math.min(pressure[pi + 2], pressure[pi + 3]);
-        // 静止密度：低于 m₀ 的格不施反作用力，也不自发膨胀（固有膨胀同样按比例衰减），
-        // 只保留自重——稀薄的水既不会回推、也不会把自己撑开，于是失去支撑、落回水体。
-        // 用连续斜坡而不是硬阈值，避免格子在阈值两侧来回跳。
-        const react =
-          restDensity > 0 ? Math.min(1, Math.max(0, (m - restHalf) * restInv)) : 1;
-        const intrinsic = hasMass ? m * betaQuarter * react : 0;
-        netP[i] = rho * horz * react + intrinsic; // 竖直面压力（上下）
-        netPH[i] = rho * vert * react + intrinsic; // 水平面压力（左右）
-        // 只有含物质的格才向外施压；空格不传递压力（自由液面压力为 0）
-        if (!hasMass) continue;
-        // 流动卸压：正在流动的那部分液体把压力转化成了运动，不再向四周施压。
-        // 静止比例 = 1 − 上一步流出量/m（只计流出，流入不计），四个方向的输出压力
-        // （含向下的自重）统一乘以它。
-        // 自由下落的水团整体在流动 → 几乎不施压 → 侧向无推力，不散开；
-        // 静止水柱不流动 → 全部压力传下去 → 池底压力大、向两侧摊开。
-        // 低通平滑：直接用 1 − 流出量/m 会形成"流动→卸压→不流→加压→流动"
-        // 的逐步反馈，单格质量一步大一步小地来回跳（闪烁）。平滑后卸压随流动渐进生效。
-        // 只统计流出量（流入不计）。flow 边的正方向是 左→右 / 上→下：
-        // 右、下两条边 >0 表示本格流出；左、上两条边 <0 表示本格流出（取反变正）。
-        let moved = 0;
-        if (flow[i * 2] > 0) moved += flow[i * 2]; // 流向右邻
-        if (flow[i * 2 + 1] > 0) moved += flow[i * 2 + 1]; // 流向下邻
-        if (x > 0 && flow[(i - 1) * 2] < 0) moved += -flow[(i - 1) * 2]; // 流向左邻
-        if (y > 0 && flow[(i - w) * 2 + 1] < 0) moved += -flow[(i - w) * 2 + 1]; // 流向上邻
-        still[i] += (Math.max(0, 1 - moved / m) - still[i]) * STILL_SMOOTHING;
-        const s = still[i];
-        const outV = (rho * horz * react * damp + intrinsic) * s; // 竖直面输出（上、下）
-        const outH = (rho * vert * react * damp + intrinsic) * s; // 水平面输出（左、右）
-        const outDown = outV + gravity * m * s; // 向下再加自重
-        // 直接推向四邻，不判断墙体：推进墙格的压力由下方「墙体反射」阶段原样退回。
-        // 域边界外没有格子可写，视为刚性面直接弹回本格。
-        if (y > 0) next[(i - w) * 4 + 1] += outV; // 上邻收到来自下方的输出
-        else next[pi] += outV;
-        if (y < h - 1) next[(i + w) * 4] += outDown; // 下邻收到来自上方的输出 + 自重
-        else next[pi + 1] += outDown; // 底边界：连同自重一起弹回
-        if (x > 0) next[(i - 1) * 4 + 3] += outH; // 左邻收到来自右方的输出
-        else next[pi + 2] += outH;
-        if (x < w - 1) next[(i + 1) * 4 + 2] += outH; // 右邻收到来自左方的输出
-        else next[pi + 3] += outH;
       }
-    }
 
-    // ---- 墙体反射：墙格把本帧收到的全部压力原样退回给施压的邻居（法向反力）----
-    // 在同一帧内完成，反弹不额外延迟一帧；墙格自身压力清零，不跨帧残留。
-    // 上方液体压下来的自重已包含在 next[pi] 中，随之一并顶回。
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        const i = row + x;
-        if (!wall[i]) continue;
-        const pi = i * 4;
-        // next[pi+d] 来自方向 d 的邻居 → 退回到该邻居朝向本格的槽位
-        if (y > 0) next[(i - w) * 4 + 1] += next[pi];
-        if (y < h - 1) next[(i + w) * 4] += next[pi + 1];
-        if (x > 0) next[(i - 1) * 4 + 3] += next[pi + 2];
-        if (x < w - 1) next[(i + 1) * 4 + 2] += next[pi + 3];
-        next[pi] = next[pi + 1] = next[pi + 2] = next[pi + 3] = 0;
+      // ---- 墙体反射：墙格把本帧收到的全部压力原样退回给施压的邻居（法向反力）----
+      // 在同一帧内完成，反弹不额外延迟一帧；墙格自身压力清零，不跨帧残留。
+      // 上方液体压下来的自重已包含在 next[pi] 中，随之一并顶回。
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const i = row + x;
+          if (kind[i] !== CELL_WALL) continue;
+          const pi = i * 4;
+          // next[pi+d] 来自方向 d 的邻居 → 退回到该邻居朝向本格的槽位
+          if (y > 0) next[(i - w) * 4 + 1] += next[pi];
+          if (y < h - 1) next[(i + w) * 4] += next[pi + 1];
+          if (x > 0) next[(i - 1) * 4 + 3] += next[pi + 2];
+          if (x < w - 1) next[(i + 1) * 4 + 2] += next[pi + 3];
+          next[pi] = next[pi + 1] = next[pi + 2] = next[pi + 3] = 0;
+        }
       }
-    }
-    pressure.set(next);
+      pressure.set(next);
     }
 
     // ---- 第二遍：边流量（规则2）----
@@ -365,12 +386,12 @@ export class FluidEngine {
         const i = row + x;
         let fh = 0;
         let fv = 0;
-        if (!wall[i]) {
+        if (kind[i] !== CELL_WALL) {
           const mi = mass[i];
-          if (x < w - 1 && !wall[i + 1]) {
+          if (x < w - 1 && kind[i + 1] !== CELL_WALL) {
             fh = edgeFlow(netPH[i] - netPH[i + 1], mi, mass[i + 1], flowScale);
           }
-          if (y < h - 1 && !wall[i + w]) {
+          if (y < h - 1 && kind[i + w] !== CELL_WALL) {
             const weight = mi > EMPTY_EPS ? gravity * mi : 0;
             fv = edgeFlow(netP[i] + weight - netP[i + w], mi, mass[i + w], flowScale);
           }
@@ -427,31 +448,77 @@ export class FluidEngine {
     }
   }
 
-  paintLiquid(cx: number, cy: number, radius: number, amount = 2.5): void {
+  /** 开始新的一笔：清空"本笔已画过"的标记（按下鼠标时调用） */
+  beginStroke(): void {
+    this.strokeMask.fill(0);
+  }
+
+  /**
+   * 画液体：每一笔里每格最多加一次 amount（默认 m₀）。
+   * - 拖动时 paintLine 每移动半格盖一次章，同一格会被盖好几次；只认第一次，避免叠到 6 倍 m₀
+   *   （过压水团一松开就沿四条轴喷出去，拖出十字形射线）。
+   * - 已经有水的格照样能加：装不下（超过 m₀）的部分先补进画刷格和它们的四邻里没满的格
+   *   （离画刷中心由近到远）；这些都满了，剩下的全加到画刷中心那一格，由压力推开。
+   */
+  paintLiquid(cx: number, cy: number, radius: number, amount = Math.max(this.params.restDensity, 0.1)): void {
+    const { w, h, mass, kind, strokeMask } = this;
+    const brush: number[] = [];
+    let excess = 0;
     this.forEachBrushCell(cx, cy, radius, (i) => {
-      if (!this.wall[i]) this.mass[i] += amount;
+      if (kind[i] === CELL_WALL || strokeMask[i]) return;
+      strokeMask[i] = 1;
+      brush.push(i);
+      const put = Math.max(0, Math.min(amount, amount - mass[i]));
+      mass[i] += put;
+      excess += amount - put;
     });
+    if (excess <= 1e-9) return;
+    const d2 = (i: number) => {
+      const dx = (i % w) - cx;
+      const dy = Math.floor(i / w) - cy;
+      return dx * dx + dy * dy;
+    };
+    // 画刷格 + 四邻里没满的格，离画刷中心由近到远补满
+    const cand = new Set<number>();
+    for (const i of brush) {
+      cand.add(i);
+      const x = i % w;
+      const y = (i - x) / w;
+      if (y > 0) cand.add(i - w);
+      if (y < h - 1) cand.add(i + w);
+      if (x > 0) cand.add(i - 1);
+      if (x < w - 1) cand.add(i + 1);
+    }
+    const open = [...cand].filter((j) => kind[j] !== CELL_WALL && mass[j] < amount).sort((a, b) => d2(a) - d2(b));
+    for (const j of open) {
+      const put = Math.min(excess, amount - mass[j]);
+      mass[j] += put;
+      excess -= put;
+      if (excess <= 1e-9) return;
+    }
+    // 周围都满了：剩下的加到画刷中心（离 (cx, cy) 最近的画刷格）
+    let center = brush[0];
+    for (const i of brush) if (d2(i) < d2(center)) center = i;
+    mass[center] += excess;
   }
 
   paintWall(cx: number, cy: number, radius: number): void {
     this.forEachBrushCell(cx, cy, radius, (i) => {
-      this.wall[i] = 1;
-      this.source[i] = 0;
+      this.kind[i] = CELL_WALL;
       this.mass[i] = 0;
     });
   }
 
   paintErase(cx: number, cy: number, radius: number): void {
     this.forEachBrushCell(cx, cy, radius, (i) => {
-      this.wall[i] = 0;
-      this.source[i] = 0;
+      this.kind[i] = CELL_FLUID;
       this.mass[i] = 0;
     });
   }
 
   paintSource(cx: number, cy: number, radius: number): void {
     this.forEachBrushCell(cx, cy, radius, (i) => {
-      if (!this.wall[i]) this.source[i] = 1;
+      if (this.kind[i] !== CELL_WALL) this.kind[i] = CELL_SOURCE;
     });
   }
 
