@@ -6,7 +6,7 @@
  * 越稀越透，最后溶进画布背景（#0A101C）。
  */
 
-import { RENDER_EMPTY_EPS, FluidEngine } from './engine';
+import { RENDER_EMPTY_EPS, FluidEngine, CELL_WALL, CELL_SOURCE } from './engine';
 import { applyPreset } from './presets';
 import type { PresetKey } from './presets';
 
@@ -151,7 +151,7 @@ export function renderEngine(
   image: ImageData,
   timeMs: number,
 ): void {
-  const { w, h, mass, wall } = engine;
+  const { w, h, mass, kind } = engine;
   const CELL = engine.cell; // 每格几个像素：由画布内部渲染尺寸反推，见 engine.ts
   const pw = w * CELL;
 
@@ -167,7 +167,7 @@ export function renderEngine(
       const i = row + x;
       const p0 = y * CELL * pw + x * CELL; // 本格左上角像素下标
 
-      if (wall[i]) {
+      if (kind[i] === CELL_WALL) {
         // 墙体 1px 内描边（砌块感）：首尾两行为描边色，中间行左右各 1px 描边
         px.fill(WALL_EDGE32, p0, p0 + CELL);
         for (let dy = 1; dy < CELL - 1; dy++) {
@@ -206,7 +206,7 @@ function drawSources(
   ctx: CanvasRenderingContext2D,
   timeMs: number,
 ): void {
-  const { w, h, wall, source } = engine;
+  const { w, h, kind } = engine;
   const CELL = engine.cell;
 
   // 水源格：脉动青色圆点（叠加在像素画面上）
@@ -216,7 +216,7 @@ function drawSources(
     const row = y * w;
     for (let x = 0; x < w; x++) {
       const i = row + x;
-      if (source[i] && !wall[i]) {
+      if (kind[i] === CELL_SOURCE) {
         const cx = x * CELL + CELL / 2;
         const cy = y * CELL + CELL / 2;
         ctx.beginPath();
@@ -244,7 +244,7 @@ export function makePreviewFrame(preset: PresetKey, w = 48, h = 48, steps = 600)
     let g: number;
     let b: number;
     let alpha = 255;
-    if (engine.wall[i]) {
+    if (engine.kind[i] === CELL_WALL) {
       r = WALL_RGB[0];
       g = WALL_RGB[1];
       b = WALL_RGB[2];

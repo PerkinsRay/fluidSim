@@ -30,6 +30,9 @@ export default function Workbench() {
   const [expansion, setExpansion] = useState(shared.engine.params.expansion);
   const [selfBase, setSelfBase] = useState(shared.engine.params.selfBase);
   const [restDensity, setRestDensity] = useState(shared.engine.params.restDensity);
+  const [wallBounce, setWallBounce] = useState(shared.engine.params.wallBounce);
+  const [tension, setTension] = useState(shared.engine.params.tension);
+  const [thinPush, setThinPush] = useState(shared.engine.params.thinPush);
   const [speed, setSpeed] = useState(shared.speed);
   const [preset, setPreset] = useState<PresetKey | ''>('');
   const [stats, setStats] = useState<SimStats>(shared.stats);
@@ -114,7 +117,7 @@ export default function Workbench() {
   );
 
   const changeParam = useCallback(
-    (key: 'elasticity' | 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'selfBase' | 'restDensity', v: number) => {
+    (key: 'elasticity' | 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'selfBase' | 'restDensity' | 'wallBounce' | 'tension' | 'thinPush', v: number) => {
       if (key === 'speed') {
         changeSpeed(v);
         return;
@@ -125,6 +128,9 @@ export default function Workbench() {
       else if (key === 'expansion') setExpansion(v);
       else if (key === 'selfBase') setSelfBase(v);
       else if (key === 'restDensity') setRestDensity(v);
+      else if (key === 'wallBounce') setWallBounce(v);
+      else if (key === 'tension') setTension(v);
+      else if (key === 'thinPush') setThinPush(v);
       else setGravity(v);
       if (!shared.running) shared.needsRedraw = true;
     },
@@ -197,7 +203,7 @@ export default function Workbench() {
               onTool={changeTool}
               brushSize={brushSize}
               onBrushSize={changeBrush}
-              params={{ elasticity, viscosity, gravity, speed, expansion, selfBase, restDensity }}
+              params={{ elasticity, viscosity, gravity, speed, expansion, selfBase, restDensity, wallBounce, tension, thinPush }}
               onParam={changeParam}
               grid={grid}
               onGrid={changeGrid}

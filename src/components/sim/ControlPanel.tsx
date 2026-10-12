@@ -16,6 +16,9 @@ export interface ParamValues {
   expansion: number
   selfBase: number
   restDensity: number
+  wallBounce: number
+  tension: number
+  thinPush: number
 }
 
 /** 控制面板（S3.2）：绘制工具 + 画刷大小 + 物理参数 + 规则说明 */
@@ -34,7 +37,7 @@ export default function ControlPanel({
   brushSize: number
   onBrushSize: (v: number) => void
   params: ParamValues
-  onParam: (key: 'elasticity' | 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'selfBase' | 'restDensity', v: number) => void
+  onParam: (key: 'elasticity' | 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'selfBase' | 'restDensity' | 'wallBounce' | 'tension' | 'thinPush', v: number) => void
   grid: number
   onGrid: (v: number) => void
 }) {
@@ -95,7 +98,7 @@ export default function ControlPanel({
             value={params.expansion}
             onChange={(v) => onParam('expansion', v)}
             format={(v) => v.toFixed(1)}
-            tooltip="压力系数 c 的 1/10：每格压力 p = c·m（c = 0~20）。表面边上的压力是重力的 2c/g 倍——c 大时水团会被表面吹散，c≈1 才和重力量级相当；c=0 则完全没有压力，水只剩重力（会原地不动）"
+            tooltip="压力系数 c 的 1/100：每格压力 p = c·max(0, m − m₀)（c = 0~200）。c 越大水越不可压缩——水深 D 格时 c ≳ 10·g·D 才压缩不到 10%；太小时水会被重力压进池底。c=0 则完全没有压力"
           />
           <ParamSlider
             label="弹性系数"
@@ -117,7 +120,7 @@ export default function ControlPanel({
             value={params.viscosity}
             onChange={(v) => onParam('viscosity', v)}
             format={(v) => v.toFixed(2)}
-            tooltip="剪切摩擦：只阻尼相邻流速的差（晃动、剪切），不阻尼整体平动——所以拉满也不会让空中的水落得更慢，只会让它不再晃、像蜂蜜一样黏。越低越像水"
+            tooltip="剪切粘性：相邻的水之间按流速差交换动量（快的拖慢的、慢的拖快的，总动量不变）。只抹平速度差，不阻尼整体平动——拉满也不会让空中的水落得更慢，只会让晃动更快停下、水流像蜂蜜一样黏。越低越像水；0 时几乎没有耗散，水会晃很久"
           />
           <ParamSlider
             label="重力"
@@ -151,6 +154,39 @@ export default function ControlPanel({
             onChange={(v) => onParam('restDensity', v)}
             format={(v) => v.toFixed(1)}
             tooltip="低于这个密度的液体不施反作用力（只保留自重与固有膨胀）——稀薄的水失去支撑，会自由落回水体而不是挂在液面上方成雾。0 = 关闭（按现在的行为）"
+          />
+          <ParamSlider
+            label="撞墙反弹"
+            en="Wall Bounce"
+            min={0}
+            max={1}
+            step={0.05}
+            value={params.wallBounce}
+            onChange={(v) => onParam('wallBounce', v)}
+            format={(v) => v.toFixed(2)}
+            tooltip="墙只给力、不改速度：水冲向墙时，贴墙那一格多一份冲击压力 2·系数·m·v²，把水减速、推回去、推向两侧。0 = 只有普通压力；1 = 完全反射的冲击力。静止的水不受影响"
+          />
+          <ParamSlider
+            label="稀相推力"
+            en="Thin Push"
+            min={0}
+            max={1}
+            step={0.05}
+            value={params.thinPush}
+            onChange={(v) => onParam('thinPush', v)}
+            format={(v) => v.toFixed(2)}
+            tooltip="双井势 u < 0.5 的那一半（u = m / 静止密度，强度 = 系数 × 20）：不到半满的水压力为正、往外推。大了下落的水会被拉稀、散成雾。0 = 关闭。静止密度为 0 时不起作用"
+          />
+          <ParamSlider
+            label="内聚拉力"
+            en="Tension"
+            min={0}
+            max={1}
+            step={0.05}
+            value={params.tension}
+            onChange={(v) => onParam('tension', v)}
+            format={(v) => v.toFixed(2)}
+            tooltip="双井势 u > 0.5 的那一半（u = m / 静止密度，强度 = 系数 × 20）：超过半满、没到满格的水压力为负、往回拉。大了水会挂在天花板上，薄层会分成一格满一格空。0 = 关闭。静止密度为 0 时不起作用"
           />
           <ParamSlider
             label="模拟速度"

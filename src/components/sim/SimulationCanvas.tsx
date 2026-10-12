@@ -221,6 +221,7 @@ export default function SimulationCanvas({
           e.currentTarget.setPointerCapture(e.pointerId);
           const { gx, gy } = toGrid(e.clientX, e.clientY);
           const tool: Tool = e.button === 2 ? 'eraser' : shared.tool;
+          shared.engine.beginStroke(); // 新的一笔：每格重新可以加一次水
           paintLine(null, { x: gx, y: gy }, tool);
           lastCellRef.current = { x: gx, y: gy };
         }}
