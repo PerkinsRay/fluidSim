@@ -23,7 +23,7 @@ export default function Footer() {
           © 2025 方格流体实验室 · Cellular Fluid Lab
         </p>
         <p className="text-xs text-muted-foreground font-mono text-center">
-          规则驱动的元胞模拟 —— 不求解 Navier-Stokes，只遵循三条局部规则
+          方格流体模拟 · Cellular Fluid Simulation
         </p>
         <div className="flex items-center gap-4">
           <a href="https://github.com" target="_blank" rel="noreferrer" aria-label="GitHub"

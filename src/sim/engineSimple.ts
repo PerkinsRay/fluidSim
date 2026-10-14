@@ -10,9 +10,9 @@
  *      a_竖直 = (p_上 − p_下)/m_边 + g。竖直面（左右相邻格之间的那个面）不加重力
  *      ——重力是 y 方向的体力，只体现在上下那个面上；
  *   3) 每条边存**动量** P = m·v（跨步保留，二阶：压差一反向，流动不会立刻跟着反向）。
- *      力只改动量：dP = F·m_src/m_边·dt，m_src 是被力推走 / 拉走的那一侧的质量——拉一个空格
+ *      力只改动量：dP = F·dt（压差是冲量，与质量无关），但要求源格有水——拉一个空格
  *      时 m_src = 0，负压拉不出水；重力是体力，dP = g·m_上·dt。动量还会随水**平流**（二维：沿本方向
- *      见 advect，垂直方向的流动也带着动量走，见第 2 步）；
+ *      见 moved，垂直方向的流动也带着动量走，见第 2 步）；
  *   4) 质量由动量迁移：这一步跨过这条边的质量 = dt · P（P 本身就是单位时间流过的质量。
  *      连续性方程，双曲型；只受"源格质量/4"限制，保证质量恒非负）。
  *
@@ -25,7 +25,7 @@
  * 两个标定旋钮：`timeStep`（整体快慢；自由落体位移 ∝ (步数·dt)²，所以它比 CFL 允许的小得多）
  * 与 `viscosity`（剪切粘性：相邻平行边之间按速度差交换动量，见 applyViscosity）。
  */
-import { FluidEngine, CELL_WALL, CELL_SOURCE } from './engine';
+import { FluidEngine, CELL_WALL, CELL_SOURCE } from "./engine";
 
 /** 调试读数：一格的质量、压力，以及四条边的压力差与流速（正 = 由本格流出） */
 export interface CellProbe {
@@ -70,16 +70,34 @@ const COH_SCALE = 20;
  * 水的最大搬运速度（格/单位时间）：|P| / m_源 的上限。
  * 64 格的画布自由落体到底约 √(2·g·64) ≈ 11，取 12 不影响正常的下落、溃坝与撞墙，
  * 只截掉近干薄水里的虚假高速（实测雨预设里横向 49 → 15，可见水 16 → 11）。
+ *
+ * 注意这个上限要按**合速度** |(u,v)| 施加，不能对 fh、fv 各自限 —— 分量各限会让斜向的
+ * 合速度达到 MAX_SPEED·√2，结构上允许对角比轴向快 41%，远场真空里水团因此长成方形
+ * （比值 1.28 ≈ √2 的方向）。按合速度限制后是 0.98，接近圆。见 advanceSub 里的等比缩放。
  */
-const MAX_SPEED = 12;
+const MAX_SPEED = 24;
+
+
 
 /**
- * 二维平流里垂直方向那一项（交叉项）的系数。
- * 0 = 只沿本方向平流：动量只能沿轴走，爆开的水长成十字；
- * 1 = 完整交叉项：中心取平均的横向流把动量往两侧拖，爆开的水长成方形（角在对角线上）；
- * 1/√2：两种偏差大致抵消，最接近圆（实测单格爆开 100 步 A4 = 0.04，1 为 −0.59，0 为 0.89）。
+ * 二维平流里垂直方向那一项（交叉项）的系数 —— 形状与守恒的权衡旋钮。
+ *
+ * 交叉项把 x 动量沿 y 方向搬运，守恒性要求有它；但它由轴对齐的通量拼出来，会优先
+ * 往对角喂质量，偏差随传播距离累积。真空里单格水团的 对角/轴向 半径比（步 400）：
+ *   CROSS=0 → 1.09（圆）· 0.4 → 1.16 · 0.6 → 1.24 · 1 → 1.30（方形，√2=1.41）
+ * 代价（剪切层 x 动量漂移，应为 0 / 45° 匀速平移，精确 9.0）：
+ *   CROSS=0 → 68.56 / 7.7 · 0.4 → 7.89 / 8.8 · 0.6 → 2.30 / 8.9 · 1 → 0.00 / 8.9
+ *
+ * 当前取 1：守恒优先（剪切漂移 0.00、45° 平移 8.9/9.0）。方形不靠调它来修 ——
+ * 真正的根因是限速各向异性，见 limitP 上方的"各向同性限速"（远场真空 1.28 → 0.98）。
+ *
+ * 注：形状必须在**远场**量（步 400 级别）。近场（步 25）各向异性还没长出来，
+ * 会读到假的 1.00 —— 这里的结论早期被这个坑误导过多次。
  */
 const CROSS = 1;
+
+
+
 
 /**
  * 剪切粘性的标定：k = VISC_SCALE · viscosity · dt。滑杆 0.95 → 每秒约 11 份速度差被抹平；
@@ -100,8 +118,12 @@ const SOURCE_RADIUS = 4;
 const SOURCE_RING: [number, number][] = (() => {
   const r = SOURCE_RADIUS;
   const out: [number, number][] = [];
-  for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dy * dy <= r * r) out.push([dx, dy]);
-  return out.sort((a, b) => a[0] * a[0] + a[1] * a[1] - (b[0] * b[0] + b[1] * b[1]));
+  for (let dy = -r; dy <= r; dy++)
+    for (let dx = -r; dx <= r; dx++)
+      if (dx * dx + dy * dy <= r * r) out.push([dx, dy]);
+  return out.sort(
+    (a, b) => a[0] * a[0] + a[1] * a[1] - (b[0] * b[0] + b[1] * b[1]),
+  );
 })();
 
 export class FluidEngineSimple extends FluidEngine {
@@ -133,6 +155,9 @@ export class FluidEngineSimple extends FluidEngine {
   private fvNext: Float32Array;
   /** 质量增量缓冲：这一步的流量先全部算完再一次性应用（与扫描顺序无关） */
   private deltaBuf: Float32Array;
+  /** 各向同性限速的缩放系数（先算完再统一应用，避免依赖扫描顺序） */
+  private capH: Float32Array;
+  private capV: Float32Array;
 
   constructor(w: number, h: number) {
     super(w, h);
@@ -143,6 +168,8 @@ export class FluidEngineSimple extends FluidEngine {
     this.fhNext = new Float32Array(w * h);
     this.fvNext = new Float32Array(w * h);
     this.deltaBuf = new Float32Array(w * h);
+    this.capH = new Float32Array(w * h);
+    this.capV = new Float32Array(w * h);
   }
 
   override clear(): void {
@@ -169,8 +196,10 @@ export class FluidEngineSimple extends FluidEngine {
     const m0 = Math.max(restDensity, 0);
     // 内聚强度（见 COH_SCALE）：只在有静止密度时才有意义（双井的两个井底是 0 与 m₀）
     // 两半分开调：u < 0.5 的推力瓣用 thinPush，u > 0.5 的拉力瓣用 tension
-    const cohPush = m0 > 0 ? Math.max(this.params.thinPush ?? 0, 0) * COH_SCALE : 0;
-    const cohPull = m0 > 0 ? Math.max(this.params.tension ?? 0, 0) * COH_SCALE : 0;
+    const cohPush =
+      m0 > 0 ? Math.max(this.params.thinPush ?? 0, 0) * COH_SCALE : 0;
+    const cohPull =
+      m0 > 0 ? Math.max(this.params.tension ?? 0, 0) * COH_SCALE : 0;
     const ampPush = cohPush * m0;
     const ampPull = cohPull * m0;
     // 声速 CFL：dt ≤ 0.5/√(2S + g)，S = 最硬段的斜率（双井在 u=0 处斜率 cohPush，u=1 处 cohPull）
@@ -211,11 +240,26 @@ export class FluidEngineSimple extends FluidEngine {
         if (impact > 0) {
           let v2 = 0;
           // 边上存的是动量 P，速度 v = P / m_边（m_边 = 两侧平均质量）
-          const vOf = (P: number, a: number, b: number) => { const me = 0.5 * (mass[a] + mass[b]); return me > 1e-6 ? P / me : 0; };
-          if ((x === w - 1 || kind[i + 1] === CELL_WALL) && x > 0) { const v = vOf(fhOld[i - 1], i - 1, i); if (v > 0) v2 += v * v; } // 右侧是墙
-          if (x === 0 || kind[i - 1] === CELL_WALL) { const v = x < w - 1 ? vOf(fhOld[i], i, i + 1) : 0; if (v < 0) v2 += v * v; } // 左侧是墙
-          if ((y === h - 1 || kind[i + w] === CELL_WALL) && y > 0) { const v = vOf(fvOld[i - w], i - w, i); if (v > 0) v2 += v * v; } // 下方是墙
-          if (y === 0 || kind[i - w] === CELL_WALL) { const v = y < h - 1 ? vOf(fvOld[i], i, i + w) : 0; if (v < 0) v2 += v * v; } // 上方是墙
+          const vOf = (P: number, a: number, b: number) => {
+            const me = 0.5 * (mass[a] + mass[b]);
+            return me > 1e-6 ? P / me : 0;
+          };
+          if ((x === w - 1 || kind[i + 1] === CELL_WALL) && x > 0) {
+            const v = vOf(fhOld[i - 1], i - 1, i);
+            if (v > 0) v2 += v * v;
+          } // 右侧是墙
+          if (x === 0 || kind[i - 1] === CELL_WALL) {
+            const v = x < w - 1 ? vOf(fhOld[i], i, i + 1) : 0;
+            if (v < 0) v2 += v * v;
+          } // 左侧是墙
+          if ((y === h - 1 || kind[i + w] === CELL_WALL) && y > 0) {
+            const v = vOf(fvOld[i - w], i - w, i);
+            if (v > 0) v2 += v * v;
+          } // 下方是墙
+          if (y === 0 || kind[i - w] === CELL_WALL) {
+            const v = y < h - 1 ? vOf(fvOld[i], i, i + w) : 0;
+            if (v < 0) v2 += v * v;
+          } // 上方是墙
           pi += impact * m * v2;
         }
         p[i] = pi;
@@ -266,70 +310,156 @@ export class FluidEngineSimple extends FluidEngine {
         const mi = mass[i];
         if (x < w - 1 && kind[i + 1] !== CELL_WALL) {
           const mj = mass[i + 1];
-          const me = Math.max(0.5 * (mi + mj), 1e-3); // 被推动的质量（惯性）
-          // 平流的控制体是这条面自己的：左格心 ↔ 右格心。边界上的量由相邻两面插值，
-          // 不能直接拿"西邻面/本面"当边界（那等于把控制体西移半格 → 奇偶错位）。
-          const PW = x > 0 ? fh[i - 1] : 0;
-          const mW = x > 0 ? 0.5 * (mass[i - 1] + mi) : me;
-          const PE = x < w - 2 ? fh[i + 1] : 0;
-          const mE = x < w - 2 ? 0.5 * (mass[i + 1] + mass[i + 2]) : me;
-          let P0 = this.advect(fh[i], PW, mW, PE, mE, me, dt);
-          // 二维平流：水平动量也随竖直流动走。控制体上边界（格 i、i+1 上方两条竖直边的平均）流进来的水
-          // 带着上一行这条水平边的速度，下边界流出去的水带着本边的速度（迎风）。
+          // 沿本方向平流（直接搬动量，见 moved）：本边交出自己那一份，
+          // 再收下左邻边（向右流时）和右邻边（向左流时）交过来的那一份。贴墙的邻边 P 恒为 0。
+          const PW = x > 0 ? fh[i - 1] : 0; // 左邻边 i−1 → i，源格 i−1
+          const PE = x < w - 1 ? fh[i + 1] : 0; // 右邻边 i+1 → i+2（与左邻 x>0 对称）
+          let P0 =
+            fh[i] -
+            this.moved(fh[i], fh[i] > 0 ? mi : mj, dt) +
+            (PW > 0 ? this.moved(PW, mass[i - 1], dt) : 0) +
+            (PE < 0 ? this.moved(PE, x < w - 2 ? mass[i + 2] : mj, dt) : 0);
+          // 二维平流：水平动量也随竖直流动走。横向通量取**源侧**那条竖直边的全量（迎风），
+          // 不取两条的平均——平均会少搬一点（45° 匀速平移实测 8.9 格，精确解 9.0；
+          // 取源侧全量正好 9.0，取源侧一半则只有 8.5）。
           {
-            const u = fh[i] / me;
+            // 两步迎风：先由 fh 符号定出水平动量的源格 src，再由 fv 符号定出该 u 往哪搬
+            const src = fh[i] >= 0 ? i : i + 1;
             if (y > 0) {
-              const qT = 0.5 * dt * (fv[i - w] + fv[i + 1 - w]); // 正 = 向下流进控制体
-              const mT = 0.5 * (mass[i - w] + mass[i + 1 - w]);
-              P0 += CROSS * qT * (qT > 0 ? (mT > 1e-6 ? fh[i - w] / mT : 0) : u);
+              const qT = dt * fv[src - w];
+              let uT: number;
+              // fh 存在**边**上，fh[格号] 取的是该格右侧那条边，不是该格的水平动量 ——
+              // 直接用会让两条镜像边取到同一条边、加上同一个值（而非相反数），镜像因此破掉。
+              // 格心水平动量 = 该格左右两条边的平均。
+              const cu = (g: number) => 0.5 * ((g % w > 0 ? fh[g - 1] : 0) + (g % w < w - 1 ? fh[g] : 0));
+              if (qT > 0) {
+                const mUp = mass[src - w];
+                uT = mUp > 1e-6 ? cu(src - w) / mUp : 0;
+              } else {
+                const mSrc = mass[src];
+                uT = mSrc > 1e-6 ? cu(src) / mSrc : 0;
+              }
+              P0 += CROSS * qT * uT;
             }
             if (y < h - 1) {
-              const qB = 0.5 * dt * (fv[i] + fv[i + 1]); // 正 = 向下流出控制体
-              const mB = 0.5 * (mass[i + w] + mass[i + 1 + w]);
-              P0 -= CROSS * qB * (qB > 0 ? u : mB > 1e-6 ? fh[i + w] / mB : 0);
+              const qB = dt * fv[src];
+              let uB: number;
+              const cu2 = (g: number) => 0.5 * ((g % w > 0 ? fh[g - 1] : 0) + (g % w < w - 1 ? fh[g] : 0));
+              if (qB > 0) {
+                const mSrc = mass[src];
+                uB = mSrc > 1e-6 ? cu2(src) / mSrc : 0;
+              } else {
+                const mBot = mass[src + w];
+                uB = mBot > 1e-6 ? cu2(src + w) / mBot : 0;
+              }
+              P0 -= CROSS * qB * uB;
             }
           }
           // 内聚只在两侧都有水的边上：水对水的力成对出现、互相抵消，整团水的质心不受影响
           const coh = mi > WET && mj > WET ? q[i] - q[i + 1] : 0;
-          // 力推动的是"被推走的那一侧"的水：F > 0 把 i 推向 j，动量增量 ∝ m_i；F < 0 把 j 拉回 i，
-          // 动量增量 ∝ m_j——拉一个空格时 m_j = 0，负压拉不出水，也就不会把水粘在空气上。
+          // 压差是冲量：dP = F·dt，与质量无关（原来还除以 m_边，是多余的）。
+          // 但源格必须有水：F > 0 把 i 推向 j，源格是 i；F < 0 把 j 拉回 i，源格是 j——
+          // 拉一个空格时源格为空，负压拉不出水，也就不会把水粘在空气上。
           const F = p[i] - p[i + 1] + coh;
           const msrc = F > 0 ? mi : mj;
-          fhNext[i] = this.limitP(P0 + ((F * msrc) / me) * dt, mi, mj, dt);
+          fhNext[i] = this.limitP(P0 + (msrc > 1e-9 ? F : 0) * dt, mi, mj, dt);
         } else {
           fhNext[i] = 0; // 右侧是墙 / 越界：法向速度为 0
         }
         if (y < h - 1 && kind[i + w] !== CELL_WALL) {
           const mj = mass[i + w];
-          const me = Math.max(0.5 * (mi + mj), 1e-3);
-          const PW = y > 0 ? fv[i - w] : 0;
-          const mW = y > 0 ? 0.5 * (mass[i - w] + mi) : me;
-          const PE = y < h - 2 ? fv[i + w] : 0;
-          const mE = y < h - 2 ? 0.5 * (mass[i + w] + mass[i + 2 * w]) : me;
-          let P0 = this.advect(fv[i], PW, mW, PE, mE, me, dt);
-          // 二维平流：竖直动量也随水平流动走。控制体左边界（格 i、i+w 左侧两条水平边的平均）流进来的水
-          // 带着左一列这条竖直边的速度，右边界流出去的水带着本边的速度（迎风）。
+          const PW = y > 0 ? fv[i - w] : 0; // 上邻边 i−w → i，源格 i−w
+          const PE = y < h - 1 ? fv[i + w] : 0; // 下邻边 i+w → i+2w（与上邻 y>0 对称）
+          let P0 =
+            fv[i] -
+            this.moved(fv[i], fv[i] > 0 ? mi : mj, dt) +
+            (PW > 0 ? this.moved(PW, mass[i - w], dt) : 0) +
+            (PE < 0 ? this.moved(PE, y < h - 2 ? mass[i + 2 * w] : mj, dt) : 0);
+          // 二维平流：竖直动量也随水平流动走。横向通量同样取源侧那条水平边的全量（迎风）。
           {
-            const u = fv[i] / me;
+            // 两步迎风（竖直边的镜像）：src 由 fv 符号定，v 的取向由 fh 符号定
+            const src = fv[i] >= 0 ? i : i + w;
             if (x > 0) {
-              const qL = 0.5 * dt * (fh[i - 1] + fh[i + w - 1]); // 正 = 向右流进控制体
-              const mL = 0.5 * (mass[i - 1] + mass[i - 1 + w]);
-              P0 += CROSS * qL * (qL > 0 ? (mL > 1e-6 ? fv[i - 1] / mL : 0) : u);
+              const qL = dt * fh[src - 1];
+              let vL: number;
+              const cv = (g: number) => 0.5 * ((g >= w ? fv[g - w] : 0) + (g < w * h - w ? fv[g] : 0));
+              if (qL > 0) {
+                const mLc = mass[src - 1];
+                vL = mLc > 1e-6 ? cv(src - 1) / mLc : 0;
+              } else {
+                const mSrc = mass[src];
+                vL = mSrc > 1e-6 ? cv(src) / mSrc : 0;
+              }
+              P0 += CROSS * qL * vL;
             }
             if (x < w - 1) {
-              const qR = 0.5 * dt * (fh[i] + fh[i + w]); // 正 = 向右流出控制体
-              const mR = 0.5 * (mass[i + 1] + mass[i + 1 + w]);
-              P0 -= CROSS * qR * (qR > 0 ? u : mR > 1e-6 ? fv[i + 1] / mR : 0);
+              const qR = dt * fh[src];
+              let vR: number;
+              const cv2 = (g: number) => 0.5 * ((g >= w ? fv[g - w] : 0) + (g < w * h - w ? fv[g] : 0));
+              if (qR > 0) {
+                const mSrc = mass[src];
+                vR = mSrc > 1e-6 ? cv2(src) / mSrc : 0;
+              } else {
+                const mRc = mass[src + 1];
+                vR = mRc > 1e-6 ? cv2(src + 1) / mRc : 0;
+              }
+              P0 -= CROSS * qR * vR;
             }
           }
           const coh = mi > WET && mj > WET ? q[i] - q[i + w] : 0;
           const F = p[i] - p[i + w] + coh;
           const msrc = F > 0 ? mi : mj;
           // 重力是体力：作用在上方那格的水上（它要往下掉），动量增量 g·m_i
-          fvNext[i] = this.limitP(P0 + ((F * msrc) / me + g * mi) * dt, mi, mj, dt);
+          fvNext[i] = this.limitP(
+            P0 + ((msrc > 1e-9 ? F : 0) + g * mi) * dt,
+            mi,
+            mj,
+            dt,
+          );
         } else {
           fvNext[i] = 0; // 下方是墙 / 越界：法向速度为 0
         }
+      }
+    }
+    // 各向同性限速（逐边、与扫描顺序无关）：分量各限 MAX_SPEED 会让斜向合速度达
+    // MAX_SPEED·√2，结构上允许对角比轴向快 41% → 远场水团长成方形。按合速度限制消掉它。
+    // 必须先把缩放系数全部算完、再统一应用：原地改 fhNext/fvNext 会让后扫到的边读到
+    // 已被缩放的邻边值，结果依赖扫描顺序（实测上下不对称 2.2e-2，而左右只有 3.8e-6）。
+    {
+      const sh = this.capH;
+      const sv = this.capV;
+      sh.fill(1);
+      sv.fill(1);
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const i = row + x;
+          if (kind[i] === CELL_WALL) continue;
+          if (x < w - 1 && kind[i + 1] !== CELL_WALL) {
+            const me = 0.5 * (mass[i] + mass[i + 1]);
+            if (me > 1e-9) {
+              const u = fhNext[i] / me;
+              const vA = y > 0 ? 0.5 * (fvNext[i - w] + fvNext[i]) : fvNext[i];
+              const vB = y > 0 ? 0.5 * (fvNext[i + 1 - w] + fvNext[i + 1]) : fvNext[i + 1];
+              const sp = Math.hypot(u, 0.5 * (vA + vB) / me);
+              if (sp > MAX_SPEED) sh[i] = MAX_SPEED / sp;
+            }
+          }
+          if (y < h - 1 && kind[i + w] !== CELL_WALL) {
+            const me = 0.5 * (mass[i] + mass[i + w]);
+            if (me > 1e-9) {
+              const v = fvNext[i] / me;
+              const uA = x > 0 ? 0.5 * (fhNext[i - 1] + fhNext[i]) : fhNext[i];
+              const uB = x > 0 ? 0.5 * (fhNext[i + w - 1] + fhNext[i + w]) : fhNext[i + w];
+              const sp = Math.hypot(0.5 * (uA + uB) / me, v);
+              if (sp > MAX_SPEED) sv[i] = MAX_SPEED / sp;
+            }
+          }
+        }
+      }
+      for (let i = 0; i < fhNext.length; i++) {
+        if (sh[i] !== 1) fhNext[i] *= sh[i];
+        if (sv[i] !== 1) fvNext[i] *= sv[i];
       }
     }
     fh.set(fhNext);
@@ -376,43 +506,42 @@ export class FluidEngineSimple extends FluidEngine {
     const i = y * w + x;
     const solid = (j: number) => j < 0 || j >= w * h || kind[j] === CELL_WALL;
     // 边上存的是动量 P = m·v，读数换回速度 v = P / m_边
-    const vel = (P: number, a: number, b: number) => { const me = 0.5 * (mass[a] + mass[b]); return me > 1e-6 ? P / me : 0; };
-    const right = x < w - 1 && !solid(i + 1) ? { dp: p[i] - p[i + 1], v: vel(fh[i], i, i + 1) } : { dp: 0, v: 0 };
-    const left = x > 0 && !solid(i - 1) ? { dp: p[i] - p[i - 1], v: -vel(fh[i - 1], i - 1, i) } : { dp: 0, v: 0 };
-    const down = y < h - 1 && !solid(i + w) ? { dp: p[i] - p[i + w], v: vel(fv[i], i, i + w) } : { dp: 0, v: 0 };
-    const up = y > 0 && !solid(i - w) ? { dp: p[i] - p[i - w], v: -vel(fv[i - w], i - w, i) } : { dp: 0, v: 0 };
+    const vel = (P: number, a: number, b: number) => {
+      const me = 0.5 * (mass[a] + mass[b]);
+      return me > 1e-6 ? P / me : 0;
+    };
+    const right =
+      x < w - 1 && !solid(i + 1)
+        ? { dp: p[i] - p[i + 1], v: vel(fh[i], i, i + 1) }
+        : { dp: 0, v: 0 };
+    const left =
+      x > 0 && !solid(i - 1)
+        ? { dp: p[i] - p[i - 1], v: -vel(fh[i - 1], i - 1, i) }
+        : { dp: 0, v: 0 };
+    const down =
+      y < h - 1 && !solid(i + w)
+        ? { dp: p[i] - p[i + w], v: vel(fv[i], i, i + w) }
+        : { dp: 0, v: 0 };
+    const up =
+      y > 0 && !solid(i - w)
+        ? { dp: p[i] - p[i - w], v: -vel(fv[i - w], i - w, i) }
+        : { dp: 0, v: 0 };
     return { x, y, mass: mass[i], pressure: p[i], right, left, down, up };
   }
 
   /**
-   * 平流：**速度跟着质量走**。控制体是**这条面自己的**——从左侧格心到右侧格心（面在正中）。
-   *
-   * 两条边界在**格心**上，那里的通量与速度由相邻的两个面各取一半插值出来；每条边界再按
-   * 通量方向取上游那一侧的速度（迎风）。写成这样左右是**显式对称**的：每条边界只看它两侧的
-   * 两个面，跟"我自己动不动"无关。
-   *
-   * 之前那版把"西邻面、本面"直接当控制体的两条边界——等于把控制体整整西移了半格。交错网格上
-   * 半格错位会造出奇偶错位，实测整场挪一格、水恒向右漂（镜像测试：A 的剖面 = B 的剖面错开一格）。
+   * 沿本方向的动量平流（直接搬动量，一阶迎风）：一条边这一步搬走的质量是 dt·|P|，
+   * 占源格质量的比例 f = dt·|P| / m_源；这些水带着的动量 f·P = P·|P|·dt / m_源，交给流向那一侧的下一条边：
+   *   P[i] += moved(P[i−1])（P[i−1] > 0，从左边流进来）
+   *         − moved(P[i])
+   *         + moved(P[i+1])（P[i+1] < 0，从右边流进来）
+   * 一边减多少另一边加多少，动量守恒。用 P·|P| 而不是 P²：向左流（P < 0）时搬走的是负动量。
+   * f 封顶 1：limitP 已保证 f ≤ 1/4，封顶只防迁移后源格变空（m_源 → 0）时除出无穷大。
    */
-  private advect(
-    P: number,
-    PW: number,
-    mW: number,
-    PE: number,
-    mE: number,
-    mSelf: number,
-    dt: number,
-  ): number {
-    // 两条控制体边界（左格心、右格心）上的质量通量 = 相邻两条边 P 的平均（P 本身就是质量通量）
-    const qW = 0.5 * dt * (PW + P); // 西边界，正 = 向东
-    const qE = 0.5 * dt * (P + PE); // 东边界，正 = 向东
-    // 迎风：每份流过边界的质量带着上游那条边的速度 u = P/m（空边速度为 0）
-    const vel = (Pk: number, mk: number) => (mk > 1e-6 ? Pk / mk : 0);
-    const uW = qW > 0 ? vel(PW, mW) : vel(P, mSelf);
-    const uE = qE > 0 ? vel(P, mSelf) : vel(PE, mE);
-    // 直接更新动量：旧动量 + 流入 − 流出。不能先换成速度再除以新质量——下落前沿那条边的质量
-    // 一直在涨，"除新质量再乘旧质量"每步都丢动量，水团落得慢一半、还被拉长散开（实测 8 → 30 列）。
-    return P + qW * uW - qE * uE;
+  private moved(P: number, mSrc: number, dt: number): number {
+    if (P === 0) return 0;
+    const f = mSrc > 1e-9 ? Math.min(1, (Math.abs(P) * dt) / mSrc) : 1;
+    return f * P;
   }
 
   /**
@@ -420,11 +549,19 @@ export class FluidEngineSimple extends FluidEngine {
    *   J = k · m_共 · (v_a − v_b)，k = VISC_SCALE · viscosity · dt，m_共 = 两边质量的较小者。
    * 一边减多少、另一边就加多少，所以总动量守恒，整体平动（比如自由落体）不受影响——
    * 粘性只抹平相邻流速的差：晃动更快停下、水流像蜂蜜一样被"拖"着走。
-   * 只在两边都有水时交换（空气、墙不参与），交换完再做一遍 limitP 保证质量非负。
+   * 两边都有水才交换（空气不参与），交换完再做一遍 limitP 保证质量非负。
+   *
+   * 墙当作"速度 0、质量无穷大"的水：边的某个平行邻边贴墙（或越界）时，
+   * J = k·min(m, ∞)·(v − 0) = k·P，这份动量被墙吸收、墙的速度不变。四个方向（侧向两条、顺流两条）都算。
+   * 墙的拖拽再乘 (1 − wallBounce)：反弹 0 时墙完全不滑（晃动被墙磨停）；反弹 1 时墙是光滑的，
+   * 撞墙的水不会被墙吸走动量，压力才能把它推回去。
    */
   private applyViscosity(viscosity: number, dt: number): void {
     const { w, h, mass, kind } = this;
-    const k = Math.min(VISC_SCALE * Math.min(Math.max(viscosity, 0), 0.95) * dt, VISC_K_MAX);
+    const k = Math.min(
+      VISC_SCALE * Math.min(Math.max(viscosity, 0), 0.95) * dt,
+      VISC_K_MAX,
+    );
     if (k <= 0) return;
     const fh = this.fhBuf;
     const fv = this.fvBuf;
@@ -444,7 +581,11 @@ export class FluidEngineSimple extends FluidEngine {
           if (ma > 1e-6) {
             const va = fh[j] / ma;
             // 侧向：下一行同位置的水平边
-            if (y < h - 1 && kind[j + w] !== CELL_WALL && kind[j + w + 1] !== CELL_WALL) {
+            if (
+              y < h - 1 &&
+              kind[j + w] !== CELL_WALL &&
+              kind[j + w + 1] !== CELL_WALL
+            ) {
               const mb = 0.5 * (mass[j + w] + mass[j + w + 1]);
               if (mb > 1e-6) {
                 const J = k * (ma < mb ? ma : mb) * (va - fh[j + w] / mb);
@@ -469,7 +610,11 @@ export class FluidEngineSimple extends FluidEngine {
           if (ma > 1e-6) {
             const va = fv[j] / ma;
             // 侧向：右一列同位置的竖直边
-            if (x < w - 1 && kind[j + 1] !== CELL_WALL && kind[j + 1 + w] !== CELL_WALL) {
+            if (
+              x < w - 1 &&
+              kind[j + 1] !== CELL_WALL &&
+              kind[j + 1 + w] !== CELL_WALL
+            ) {
               const mb = 0.5 * (mass[j + 1] + mass[j + 1 + w]);
               if (mb > 1e-6) {
                 const J = k * (ma < mb ? ma : mb) * (va - fv[j + 1] / mb);
@@ -490,14 +635,63 @@ export class FluidEngineSimple extends FluidEngine {
         }
       }
     }
+    // 墙 = 速度 0、质量无穷大的水：每个贴墙 / 越界的平行邻边吸收 kw·P（kw = k·(1 − 反弹)）
+    const kw = k * (1 - Math.min(Math.max(this.params.wallBounce ?? 0, 0), 1));
+    for (let y = 0; kw > 0 && y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        const j = row + x;
+        if (kind[j] === CELL_WALL) continue;
+        // 水平边 j → j+1
+        if (x < w - 1 && kind[j + 1] !== CELL_WALL && fh[j] !== 0) {
+          let n = 0;
+          if (
+            y === 0 ||
+            kind[j - w] === CELL_WALL ||
+            kind[j - w + 1] === CELL_WALL
+          )
+            n++; // 上
+          if (
+            y === h - 1 ||
+            kind[j + w] === CELL_WALL ||
+            kind[j + w + 1] === CELL_WALL
+          )
+            n++; // 下
+          if (x === 0 || kind[j - 1] === CELL_WALL) n++; // 左（j−1 → j）
+          if (x + 2 >= w || kind[j + 2] === CELL_WALL) n++; // 右（j+1 → j+2）
+          if (n) nh[j] -= kw * n * fh[j];
+        }
+        // 竖直边 j → j+w
+        if (y < h - 1 && kind[j + w] !== CELL_WALL && fv[j] !== 0) {
+          let n = 0;
+          if (
+            x === 0 ||
+            kind[j - 1] === CELL_WALL ||
+            kind[j - 1 + w] === CELL_WALL
+          )
+            n++; // 左
+          if (
+            x === w - 1 ||
+            kind[j + 1] === CELL_WALL ||
+            kind[j + 1 + w] === CELL_WALL
+          )
+            n++; // 右
+          if (y === 0 || kind[j - w] === CELL_WALL) n++; // 上（j−w → j）
+          if (y + 2 >= h || kind[j + 2 * w] === CELL_WALL) n++; // 下（j+w → j+2w）
+          if (n) nv[j] -= kw * n * fv[j];
+        }
+      }
+    }
     // 交换后再做一遍质量钳制（只对开着的边）
     for (let y = 0; y < h; y++) {
       const row = y * w;
       for (let x = 0; x < w; x++) {
         const j = row + x;
         if (kind[j] === CELL_WALL) continue;
-        if (x < w - 1 && kind[j + 1] !== CELL_WALL) nh[j] = this.limitP(nh[j], mass[j], mass[j + 1], dt);
-        if (y < h - 1 && kind[j + w] !== CELL_WALL) nv[j] = this.limitP(nv[j], mass[j], mass[j + w], dt);
+        if (x < w - 1 && kind[j + 1] !== CELL_WALL)
+          nh[j] = this.limitP(nh[j], mass[j], mass[j + 1], dt);
+        if (y < h - 1 && kind[j + w] !== CELL_WALL)
+          nv[j] = this.limitP(nv[j], mass[j], mass[j + w], dt);
       }
     }
     fh.set(nh);
