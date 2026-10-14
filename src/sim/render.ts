@@ -47,7 +47,7 @@ function hslToRgb({ h, s, l }: HSL): [number, number, number] {
   else if (hp < 3) [r, g, b] = [0, c, x];
   else if (hp < 4) [r, g, b] = [0, x, c];
   else if (hp < 5) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
+  else[r, g, b] = [c, 0, x];
   const m = l - c / 2;
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
@@ -74,7 +74,7 @@ function densityLevel(m: number): number {
 /** 达到完全不透明的密度：由此往上（蓝色阶段）都是不透明的 */
 const ALPHA_OPAQUE_FROM = 0.4;
 /** 最稀薄处的不透明度：几乎溶进背景 */
-const ALPHA_MIN = 0.05;
+const ALPHA_MIN = 0.01;
 /** 不透明度分级数（做成二维 LUT，热路径上不用每格做乘法） */
 const ALPHA_LEVELS = 256;
 

@@ -75,7 +75,7 @@ const COH_SCALE = 20;
  * 合速度达到 MAX_SPEED·√2，结构上允许对角比轴向快 41%，远场真空里水团因此长成方形
  * （比值 1.28 ≈ √2 的方向）。按合速度限制后是 0.98，接近圆。见 advanceSub 里的等比缩放。
  */
-const MAX_SPEED = 24;
+const MAX_SPEED = 30;
 
 
 
