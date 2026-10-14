@@ -5,7 +5,6 @@ import { cn } from '@/lib/utils'
 
 const LINKS = [
   { href: '#simulator', label: '模拟器' },
-  { href: '#rules', label: '模拟规则' },
   { href: '#about', label: '关于' },
 ]
 

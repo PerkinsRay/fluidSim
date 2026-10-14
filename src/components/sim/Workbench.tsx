@@ -24,11 +24,9 @@ export default function Workbench() {
   const [tool, setTool] = useState<Tool>(shared.tool);
   const [brushSize, setBrushSize] = useState(shared.brushSize);
   const [grid, setGrid] = useState(DEFAULT_GRID);
-  const [elasticity, setElasticity] = useState(shared.engine.params.elasticity);
   const [viscosity, setViscosity] = useState(shared.engine.params.viscosity);
   const [gravity, setGravity] = useState(shared.engine.params.gravity);
   const [expansion, setExpansion] = useState(shared.engine.params.expansion);
-  const [selfBase, setSelfBase] = useState(shared.engine.params.selfBase);
   const [restDensity, setRestDensity] = useState(shared.engine.params.restDensity);
   const [wallBounce, setWallBounce] = useState(shared.engine.params.wallBounce);
   const [tension, setTension] = useState(shared.engine.params.tension);
@@ -117,16 +115,14 @@ export default function Workbench() {
   );
 
   const changeParam = useCallback(
-    (key: 'elasticity' | 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'selfBase' | 'restDensity' | 'wallBounce' | 'tension' | 'thinPush', v: number) => {
+    (key: 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'restDensity' | 'wallBounce' | 'tension' | 'thinPush', v: number) => {
       if (key === 'speed') {
         changeSpeed(v);
         return;
       }
       shared.engine.params[key] = v;
-      if (key === 'elasticity') setElasticity(v);
-      else if (key === 'viscosity') setViscosity(v);
+      if (key === 'viscosity') setViscosity(v);
       else if (key === 'expansion') setExpansion(v);
-      else if (key === 'selfBase') setSelfBase(v);
       else if (key === 'restDensity') setRestDensity(v);
       else if (key === 'wallBounce') setWallBounce(v);
       else if (key === 'tension') setTension(v);
@@ -203,7 +199,7 @@ export default function Workbench() {
               onTool={changeTool}
               brushSize={brushSize}
               onBrushSize={changeBrush}
-              params={{ elasticity, viscosity, gravity, speed, expansion, selfBase, restDensity, wallBounce, tension, thinPush }}
+              params={{ viscosity, gravity, speed, expansion, restDensity, wallBounce, tension, thinPush }}
               onParam={changeParam}
               grid={grid}
               onGrid={changeGrid}

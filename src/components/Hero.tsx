@@ -68,7 +68,7 @@ export default function Hero() {
             {...item(0.44)}
             className="mt-4 text-base text-muted-foreground max-w-xl leading-relaxed"
           >
-            只有三条规则的方格世界：压力反作用、合力流动、永恒重力。画一笔水，看它坠落、堆积、摊平。
+            方格上的流体实验：画一笔水，看它坠落、堆积、摊平。
           </motion.p>
         </div>
         <MiniPreview />

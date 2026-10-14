@@ -2,26 +2,23 @@ import { Droplets, BrickWall, Eraser, Waves } from 'lucide-react'
 import GlassPanel from '@/components/GlassPanel'
 import ToolButton from '@/components/ToolButton'
 import ParamSlider from '@/components/ParamSlider'
-import { Separator } from '@/components/ui/separator'
 import { TOOLS, GRID_MIN, GRID_MAX, GRID_STEP } from '@/sim/controller'
 import type { Tool } from '@/sim/controller'
 
 const TOOL_ICONS = { liquid: Droplets, wall: BrickWall, eraser: Eraser, source: Waves } as const;
 
 export interface ParamValues {
-  elasticity: number
   viscosity: number
   gravity: number
   speed: number
   expansion: number
-  selfBase: number
   restDensity: number
   wallBounce: number
   tension: number
   thinPush: number
 }
 
-/** 控制面板（S3.2）：绘制工具 + 画刷大小 + 物理参数 + 规则说明 */
+/** 控制面板（S3.2）：绘制工具 + 画刷大小 + 物理参数 */
 export default function ControlPanel({
   tool,
   onTool,
@@ -37,7 +34,7 @@ export default function ControlPanel({
   brushSize: number
   onBrushSize: (v: number) => void
   params: ParamValues
-  onParam: (key: 'elasticity' | 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'selfBase' | 'restDensity' | 'wallBounce' | 'tension' | 'thinPush', v: number) => void
+  onParam: (key: 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'restDensity' | 'wallBounce' | 'tension' | 'thinPush', v: number) => void
   grid: number
   onGrid: (v: number) => void
 }) {
@@ -101,17 +98,6 @@ export default function ControlPanel({
             tooltip="压力系数 c 的 1/100：每格压力 p = c·max(0, m − m₀)（c = 0~200）。c 越大水越不可压缩——水深 D 格时 c ≳ 10·g·D 才压缩不到 10%；太小时水会被重力压进池底。c=0 则完全没有压力"
           />
           <ParamSlider
-            label="弹性系数"
-            en="Elasticity"
-            min={1}
-            max={999}
-            step={1}
-            value={params.elasticity}
-            onChange={(v) => onParam('elasticity', v)}
-            format={(v) => v.toFixed(0)}
-            tooltip='受压反作用的"硬度"：反馈比例 ρ=k/(k+1)，越大越接近 1（完全反作用 = 不可压缩，加水能抬高水位）；越小水越软、越容易被压缩'
-          />
-          <ParamSlider
             label="粘稠度"
             en="Viscosity"
             min={0}
@@ -134,17 +120,6 @@ export default function ControlPanel({
             tooltip="每格对下方施加的恒定压力。为零时液体悬浮弥散"
           />
           <ParamSlider
-            label="自重压力"
-            en="Self Weight"
-            min={0.5}
-            max={2}
-            step={0.1}
-            value={params.selfBase}
-            onChange={(v) => onParam('selfBase', v)}
-            format={(v) => v.toFixed(1)}
-            tooltip="每格自身质量也算一份压力（α·m·g），叠加在'上方来压'上再取对冲传递——这就是水能撑住自己、不摊成一层的那部分压力。0.5 ≈ 原行为；越大液柱越硬、液面上方雾状水汽越厚（低于 0.5 水体变薄，0 会退化成一层密的薄片，故下限取 0.5）"
-          />
-          <ParamSlider
             label="静止密度"
             en="Rest Density"
             min={0}
@@ -164,7 +139,7 @@ export default function ControlPanel({
             value={params.wallBounce}
             onChange={(v) => onParam('wallBounce', v)}
             format={(v) => v.toFixed(2)}
-            tooltip="墙只给力、不改速度：水冲向墙时，贴墙那一格多一份冲击压力 2·系数·m·v²，把水减速、推回去、推向两侧。0 = 只有普通压力；1 = 完全反射的冲击力。静止的水不受影响"
+            tooltip="墙只给力、不改速度：水冲向墙时，贴墙那一格多一份冲击压力 2·系数·m·v²，把水减速、推回去、推向两侧。同时决定墙有多滑：粘性里墙被当作速度 0 的水，拖拽 × (1 − 系数)——0 = 墙完全不滑，晃动被墙磨停但撞墙弹不回来；1 = 光滑墙，弹得最远、晃得更久。静止的水不受影响"
           />
           <ParamSlider
             label="稀相推力"
@@ -202,13 +177,6 @@ export default function ControlPanel({
         </div>
       </section>
 
-      {/* (c) 规则速览 */}
-      <section>
-        <Separator className="bg-subtle mb-4" />
-        <a href="#rules" className="block text-xs text-muted-foreground leading-relaxed hover:text-cyan-300 transition-colors">
-          规则 1：对冲压力交叉传递四邻 · 规则 2：合力驱动流动且不反超 · 规则 3：重力恒压向下
-        </a>
-      </section>
     </GlassPanel>
   );
 }

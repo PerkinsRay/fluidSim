@@ -138,6 +138,43 @@ const EMPTY32 = pack(...EMPTY_RGB);
 const WALL32 = pack(...WALL_RGB);
 const WALL_EDGE32 = pack(...WALL_EDGE_RGB);
 
+/**
+ * 质量 → 像素 的一维 LUT（渐变渲染用）。
+ * 渐变后每个**像素**都有自己的插值密度，不能再每像素算一次 log 和乘方 —— 预先量化查表。
+ * 上界取 DENSITY_DEEP：之上颜色与不透明度都已饱和，不必再细分。
+ */
+const MASS_LUT_N = 1024;
+const MASS_LUT_MAX = DENSITY_DEEP;
+const MASS_LUT_SCALE = (MASS_LUT_N - 1) / MASS_LUT_MAX;
+const MASS32 = new Uint32Array(MASS_LUT_N);
+for (let n = 0; n < MASS_LUT_N; n++) {
+  const m = (n / (MASS_LUT_N - 1)) * MASS_LUT_MAX;
+  MASS32[n] = LUT32[Math.floor(densityLevel(m) * 255) * ALPHA_LEVELS + alphaLevel(m)];
+}
+
+/**
+ * 像素在格内的插值权重（只依赖 CELL，按 CELL 缓存一份）。
+ * w[d] = 偏向邻格的权重，neg[d] = 偏向的是上/左那一侧。
+ * 取 (d+0.5)/CELL − 0.5 是像素中心在"格心坐标系"里的偏移，于是相邻两格的边缘像素
+ * 正好接上（权重差恰为一个像素步长 1/CELL），跨格边界不会出现台阶。
+ */
+const fracCache = new Map<number, { w: Float32Array; neg: Uint8Array }>();
+function fracFor(cell: number): { w: Float32Array; neg: Uint8Array } {
+  let f = fracCache.get(cell);
+  if (!f) {
+    const w = new Float32Array(cell);
+    const neg = new Uint8Array(cell);
+    for (let d = 0; d < cell; d++) {
+      const u = (d + 0.5) / cell - 0.5;
+      w[d] = Math.abs(u);
+      neg[d] = u < 0 ? 1 : 0;
+    }
+    f = { w, neg };
+    fracCache.set(cell, f);
+  }
+  return f;
+}
+
 /** 每个 ImageData 的 32 位视图 */
 const pixelCache = new WeakMap<ImageData, Uint32Array>();
 
@@ -161,6 +198,9 @@ export function renderEngine(
     pixelCache.set(image, px);
   }
 
+  const { w: fw, neg: fneg } = fracFor(CELL);
+  const HALF = CELL >> 1; // 偏左 / 偏上的那一半像素（CELL 为奇数时中间那列权重为 0，归哪半都一样）
+
   for (let y = 0; y < h; y++) {
     const row = y * w;
     for (let x = 0; x < w; x++) {
@@ -181,16 +221,69 @@ export function renderEngine(
         continue;
       }
 
-      const s = mass[i];
-      const color =
-        s <= RENDER_EMPTY_EPS
-          ? EMPTY32
-          : LUT32[Math.floor(densityLevel(s) * 255) * ALPHA_LEVELS + alphaLevel(s)];
+      const mC = mass[i];
 
-      // 填充 CELL×CELL 块（逐行 fill）
+      // 3×3 邻域采样：格心保留本格真实密度，格内像素在最近四个格心之间双线性插值，
+      // 于是一格的颜色向周围 8 格连续渐变（实测跨格色阶 ≤ 3.9/255）。
+      // 墙 / 越界按本格算，否则水贴着墙会渐隐出一道暗边；空格保留真实的 0，
+      // 水的边缘才会柔和地化进背景。水与墙之间仍是硬边 —— 那是应该的。
+      const xm = x > 0 ? x - 1 : x;
+      const xp = x < w - 1 ? x + 1 : x;
+      const ym = y > 0 ? y - 1 : y;
+      const yp = y < h - 1 ? y + 1 : y;
+      const rm = ym * w;
+      const rp = yp * w;
+      const sL = kind[row + xm] === CELL_WALL ? mC : mass[row + xm];
+      const sR = kind[row + xp] === CELL_WALL ? mC : mass[row + xp];
+      const sU = kind[rm + x] === CELL_WALL ? mC : mass[rm + x];
+      const sD = kind[rp + x] === CELL_WALL ? mC : mass[rp + x];
+      const sLU = kind[rm + xm] === CELL_WALL ? mC : mass[rm + xm];
+      const sRU = kind[rm + xp] === CELL_WALL ? mC : mass[rm + xp];
+      const sLD = kind[rp + xm] === CELL_WALL ? mC : mass[rp + xm];
+      const sRD = kind[rp + xp] === CELL_WALL ? mC : mass[rp + xp];
+
+      // 快路：整个邻域都是空的 → 本格不可能插出颜色，整块 fill（memset 级，远快于逐像素）。
+      // 空气往往占画面一大半，这一条把渐变的代价基本压回原来的水平。
+      if (
+        mC <= RENDER_EMPTY_EPS &&
+        sL <= RENDER_EMPTY_EPS &&
+        sR <= RENDER_EMPTY_EPS &&
+        sU <= RENDER_EMPTY_EPS &&
+        sD <= RENDER_EMPTY_EPS &&
+        sLU <= RENDER_EMPTY_EPS &&
+        sRU <= RENDER_EMPTY_EPS &&
+        sLD <= RENDER_EMPTY_EPS &&
+        sRD <= RENDER_EMPTY_EPS
+      ) {
+        for (let dy = 0; dy < CELL; dy++) {
+          const p = p0 + dy * pw;
+          px.fill(EMPTY32, p, p + CELL);
+        }
+        continue;
+      }
+
       for (let dy = 0; dy < CELL; dy++) {
+        const wy = fw[dy];
+        const up = fneg[dy] === 1;
+        const mV = up ? sU : sD;
         const p = p0 + dy * pw;
-        px.fill(color, p, p + CELL);
+        // 双线性对固定的一组角点可整理成 m = base + wx·slope，内层只剩一次乘加。
+        // 左右半格的横向邻格不同，所以拆成两段，省掉逐像素的分支。
+        const byY = mC + wy * (mV - mC);
+        for (let half = 0; half < 2; half++) {
+          const mH = half === 0 ? sL : sR;
+          const mHV = half === 0 ? (up ? sLU : sLD) : up ? sRU : sRD;
+          const slope = mH - mC + wy * (mHV - mH - mV + mC);
+          const d0 = half === 0 ? 0 : HALF;
+          const d1 = half === 0 ? HALF : CELL;
+          for (let dx = d0; dx < d1; dx++) {
+            const m = byY + fw[dx] * slope;
+            px[p + dx] =
+              m <= RENDER_EMPTY_EPS
+                ? EMPTY32
+                : MASS32[m >= MASS_LUT_MAX ? MASS_LUT_N - 1 : (m * MASS_LUT_SCALE) | 0];
+          }
+        }
       }
     }
   }
