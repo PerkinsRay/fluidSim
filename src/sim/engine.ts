@@ -94,8 +94,8 @@ export interface SimParams {
 export const DEFAULT_PARAMS: SimParams = {
   // 水几乎不可压缩：k 取很大，ρ = k/(k+1) ≈ 0.999
   elasticity: 999,
-  viscosity: 0.1,
-  bulkViscosity: 0.5,
+  viscosity: 0.05,
+  bulkViscosity: 0.0,
   gravity: 1.0,
   // 试验引擎里是压力系数 c 的 1/100（见 engineSimple 的 C_SCALE）：2 → c = 200
   expansion: 2,
