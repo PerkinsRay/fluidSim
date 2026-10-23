@@ -9,6 +9,7 @@ const TOOL_ICONS = { liquid: Droplets, wall: BrickWall, eraser: Eraser, source: 
 
 export interface ParamValues {
   viscosity: number
+  bulkViscosity: number
   gravity: number
   speed: number
   expansion: number
@@ -17,6 +18,8 @@ export interface ParamValues {
   tension: number
   thinPush: number
 }
+
+export type ParamKey = keyof ParamValues
 
 /** 控制面板（S3.2）：绘制工具 + 画刷大小 + 物理参数 */
 export default function ControlPanel({
@@ -34,7 +37,7 @@ export default function ControlPanel({
   brushSize: number
   onBrushSize: (v: number) => void
   params: ParamValues
-  onParam: (key: 'viscosity' | 'gravity' | 'speed' | 'expansion' | 'restDensity' | 'wallBounce' | 'tension' | 'thinPush', v: number) => void
+  onParam: (key: ParamKey, v: number) => void
   grid: number
   onGrid: (v: number) => void
 }) {
@@ -109,6 +112,17 @@ export default function ControlPanel({
             tooltip="剪切粘性：相邻的水之间按流速差交换动量（快的拖慢的、慢的拖快的，总动量不变）。只抹平速度差，不阻尼整体平动——拉满也不会让空中的水落得更慢，只会让晃动更快停下、水流像蜂蜜一样黏。越低越像水；0 时几乎没有耗散，水会晃很久"
           />
           <ParamSlider
+            label="法向粘性"
+            en="Bulk Viscosity"
+            min={0}
+            max={0.95}
+            step={0.05}
+            value={params.bulkViscosity}
+            onChange={(v) => onParam('bulkViscosity', v)}
+            format={(v) => v.toFixed(2)}
+            tooltip="压缩方向的粘性：每个面和同方向上前后相邻的面交换动量（水平速度和左右的、竖直速度和上下的），总动量不变。粘稠度只管层与层之间的滑动，管不到水池上下“弹”的压缩波——没有它水停不下来，粘稠度拉满也一样。0 = 关闭；越大水越快静下来，平移、下落不受影响"
+          />
+          <ParamSlider
             label="重力"
             en="Gravity"
             min={0}
@@ -166,13 +180,13 @@ export default function ControlPanel({
           <ParamSlider
             label="模拟速度"
             en="Speed"
-            min={0.01}
-            max={2}
-            step={0.01}
+            min={0.25}
+            max={1}
+            step={0.25}
             value={params.speed}
             onChange={(v) => onParam('speed', v)}
             format={(v) => `${v.toFixed(2).replace(/\.?0+$/, '')}×`}
-            tooltip="每帧模拟步数的倍率（基准 8 步/帧）：一步最多推进一格，所以这个值直接就是每帧走几格。1× = 每帧 8 步，2× = 每帧 16 步；低于 0.125× 时不足每帧一步，改为跨帧累计（0.01× ≈ 每 12 帧一步）。模拟变贵时会自动让步以保住 60fps（与播放条上的紧凑滑杆联动，同一状态）"
+            tooltip="每帧模拟步数的倍率（基准 8 步/帧）：一步最多推进一格，所以这个值直接就是每帧走几格。1× = 每帧 8 步；调小 = 放慢观察。模拟变贵时会自动让步以保住 60fps（与播放条上的紧凑滑杆联动，同一状态）"
           />
         </div>
       </section>

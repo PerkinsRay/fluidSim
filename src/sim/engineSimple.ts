@@ -26,6 +26,7 @@
  * 与 `viscosity`（剪切粘性：相邻平行边之间按速度差交换动量，见 applyViscosity）。
  */
 import { FluidEngine, CELL_WALL, CELL_SOURCE } from "./engine";
+import { fluxRatio } from "./plic";
 
 /** 调试读数：一格的质量、压力，以及四条边的压力差与流速（正 = 由本格流出） */
 export interface CellProbe {
@@ -75,7 +76,7 @@ const COH_SCALE = 20;
  * 合速度达到 MAX_SPEED·√2，结构上允许对角比轴向快 41%，远场真空里水团因此长成方形
  * （比值 1.28 ≈ √2 的方向）。按合速度限制后是 0.98，接近圆。见 advanceSub 里的等比缩放。
  */
-const MAX_SPEED = 30;
+const MAX_SPEED = 12;
 
 
 
@@ -105,6 +106,13 @@ const CROSS = 1;
  */
 const VISC_SCALE = 12;
 const VISC_K_MAX = 0.2;
+
+/**
+ * PLIC 通量修正的上限。修正系数 φ = 窄带液体比例 / 格平均分数，界面越陡 φ 越大
+ * （极限 1/f，f → 0 时无界），封顶防止薄到 1% 的界面格一步被抽空。
+ * 取 4：界面可以锐化 4 倍，足以把一格宽的界面维持住。
+ */
+const PLIC_MAX_RATIO = 1.5;
 
 /**
  * 内聚只作用在两侧质量都 > WET 的边上（水 ↔ 水）。
@@ -137,6 +145,22 @@ export class FluidEngineSimple extends FluidEngine {
    * 存动量后 1 就够（静止后闪烁 ≤ 0.007）；调大可以进一步压低振荡，计算量随之成倍增加。
    */
   substeps = 1;
+  /**
+   * PLIC 界面锐化（质量通量按重建出来的窄带液体比例放大）。
+   *
+   * 默认**关**。渲染侧的 PLIC 与这个开关无关（渲染自己从质量场重建界面），
+   * 所以关掉它并不影响水面画成斜线。
+   *
+   * 开：静水表面过渡层 3 格 → 2 格，但自由落体 35.24 偏快且**与密度有关**
+   *     （m1=35.24 / m0.1=35.97 / m0.03=32.04），下落水团的尾巴也更长（尾 85.8%）。
+   * 关：自由落体 32.04，精确与密度无关。
+   *
+   * 为什么不能两全：本引擎的质量通量就是动量本身（dm = dt·P），PLIC 一改 dm，
+   * 质量与动量就不再描述同一份物质，而偏差正比于界面分数 f —— 自由落体因此与密度有关，
+   * 这是物理上不允许的。要兼得需要独立的速度场（见 engineMix / engineFlux）
+   * 或真正追踪界面位置的 VOF。
+   */
+  plicSharpen = false;
   /** 每格压力缓存（由自身质量决定） */
   private pressureBuf: Float32Array;
   /** 每格内聚压力（双井部分）：只用于两侧都有水的边，不作用在水 / 空气界面上 */
@@ -467,6 +491,15 @@ export class FluidEngineSimple extends FluidEngine {
     // ---- 2.5) 剪切粘性：相邻平行边之间交换动量 ----
     this.applyViscosity(viscosity, dt);
     // ---- 3) 质量按动量迁移：这一步搬走 dt·P（P 本身就是单位时间流过的质量），先全部算完再一次性应用 ----
+    // 界面格（0 < m < m₀）的**这一步质量通量**再乘一个 PLIC 修正系数 φ：把"液体均匀摊在
+    // 整格"换成"液体是一条直线切出来的一块"，界面因此保持一格宽，不被数值扩散抹开。
+    //
+    // φ 只作用在 dm 上，**不碰 fh/fv**。两次踩过的坑：
+    //  1) 只缩小 dm、动量仍按整格 ⇒ 两者描述的不是同一份物质，单格水团排不出水也攒不起
+    //     速度（自由落体 32 → 3）。所以 φ 必须同时夹在 ≥ 1（见 plic.ts：只锐化不饿死）。
+    //  2) 改成缩放 fh/fv 本身 ⇒ fh 是**跨步保留**的状态量，φ 每步复乘一次，水团一路加速
+    //     （自由落体 32 → 73.85）。通量修正是这一步的事，不能写回状态。
+    const plic = this.plicSharpen && m0 > 0;
     const delta = this.deltaBuf;
     delta.fill(0);
     for (let y = 0; y < h; y++) {
@@ -477,13 +510,33 @@ export class FluidEngineSimple extends FluidEngine {
         // 贴墙 / 越界的那条边不搬质量（它的速度恒为 0，这里再挡一次以防万一）
         const a = fh[i];
         if (a !== 0 && x < w - 1 && kind[i + 1] !== CELL_WALL) {
-          const dm = dt * a;
+          let dm = dt * a;
+          const donor = a > 0 ? i : i + 1;
+          const md = mass[donor];
+          if (plic && md > 0 && md < m0) {
+            // 窄带宽度 = 这一步扫过的格宽分数 |dm| / m_源
+            const sweep = Math.min(1, Math.abs(dm) / md);
+            dm *= fluxRatio(mass, kind, w, h, donor, a > 0 ? 0 : 2, sweep, m0, PLIC_MAX_RATIO);
+            // 锐化后不得超过"一步搬走源格的 1/4"，否则质量可能变负
+            const cap = 0.25 * md;
+            if (dm > cap) dm = cap;
+            else if (dm < -cap) dm = -cap;
+          }
           delta[i] -= dm;
           delta[i + 1] += dm;
         }
         const b = fv[i];
         if (b !== 0 && y < h - 1 && kind[i + w] !== CELL_WALL) {
-          const dm = dt * b;
+          let dm = dt * b;
+          const donor = b > 0 ? i : i + w;
+          const md = mass[donor];
+          if (plic && md > 0 && md < m0) {
+            const sweep = Math.min(1, Math.abs(dm) / md);
+            dm *= fluxRatio(mass, kind, w, h, donor, b > 0 ? 1 : 3, sweep, m0, PLIC_MAX_RATIO);
+            const cap = 0.25 * md;
+            if (dm > cap) dm = cap;
+            else if (dm < -cap) dm = -cap;
+          }
           delta[i] -= dm;
           delta[i + w] += dm;
         }
