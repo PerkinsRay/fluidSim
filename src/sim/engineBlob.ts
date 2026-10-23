@@ -83,7 +83,7 @@ export class FluidEngineBlob extends FluidEngine {
    */
   diag: DiagMode = "diag8";
   /** 墙的摩擦 0..0.95（同粘性的标定）：贴墙的面每步把一部分平行动量交给墙。0 = 光滑墙 */
-  wallFriction = 0.01;
+  wallFriction = 0.00;
   /**
    * 内聚 k1 ≥ 0：被拉稀的水（密度 ρ < m₀）往回拉，P = max(−k1·ρ, c·(ρ − m₀))。0 = 关闭。
    * 注意：0 < ρ < ρ* 这一段 P 随 ρ 下降（越稀压力越高）—— 反扩散。没有表面张力项时
