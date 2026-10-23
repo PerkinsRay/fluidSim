@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { renderEngine } from '@/sim/render'
 import { applyBrush, floorMass } from '@/sim/controller'
 import type { SimShared, SimStats, Tool } from '@/sim/controller'
-import type { CellProbe } from '@/sim/engineSimple'
+import type { CellProbe } from '@/sim/engineBlob'
 import { cn } from '@/lib/utils'
 
 /** 各工具的画刷指示环颜色 */
@@ -16,8 +16,7 @@ const TOOL_RING: Record<Tool, string> = {
 /**
  * 每帧的模拟步数上限——**它才是"画面动得多快"的旋钮**：一步最多推进一格，所以每帧几步就是
  * 每帧走几格。8 格画布配 dt=0.01 时，一次自由落体（t=√(2h/g)≈4）约 50 帧 ≈ 0.8 秒落地。
- * 速度滑杆缩放它（0.01×–2×：2× = 每帧 16 步；低于 0.125× 时不足每帧一步，小数部分跨帧累计，
- * 0.01× ≈ 每 12 帧一步），时间预算只作兜底（模拟变贵时自动让步，保 60fps）。
+ * 速度滑杆缩放它（0.25× → 2 步），时间预算只作兜底（模拟变贵时自动让步，保 60fps）。
  */
 const FRAME_MS = 1000 / 60;
 const MAX_STEPS_PER_FRAME = 8;
@@ -78,25 +77,20 @@ export default function SimulationCanvas({
     let frames = 0;
     let windowStart = performance.now();
     let renderMs = 0; // 上一帧渲染耗时：从模拟预算里扣掉，保证渲染还是 60fps
-    let stepCarry = 0; // 期望步数的小数部分：低于 0.125× 时不足每帧一步，跨帧累计
 
     const loop = (now: number) => {
-      // 模拟推进：期望步数 = 速度滑杆 × 基准 8 步/帧（可为小数），时间预算兜底保 60fps
+      // 模拟推进：每帧固定几步（速度滑杆缩放），时间预算只兜底保 60fps
       if (shared.running) {
-        stepCarry = Math.min(
-          stepCarry + MAX_STEPS_PER_FRAME * Math.min(shared.speed, 2),
-          MAX_STEPS_PER_FRAME * 2,
+        const maxSteps = Math.max(
+          1,
+          Math.round(MAX_STEPS_PER_FRAME * Math.min(shared.speed, 1)),
         );
-        const maxSteps = Math.floor(stepCarry);
-        if (maxSteps > 0) {
-          const deadline = now + FRAME_MS - renderMs;
-          let steps = 0;
-          do {
-            engine.step();
-            steps++;
-          } while (steps < maxSteps && performance.now() < deadline);
-        }
-        stepCarry -= maxSteps; // 被预算砍掉的步数不再补（让步），小数部分保留
+        const deadline = now + FRAME_MS - renderMs;
+        let steps = 0;
+        do {
+          engine.step();
+          steps++;
+        } while (steps < maxSteps && performance.now() < deadline);
       }
 
       if (shared.running || shared.needsRedraw) {

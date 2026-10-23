@@ -1,9 +1,17 @@
 /**
- * 渲染管线：密度 → 颜色（HSL 插值）× 不透明度 → ImageData 像素直写。
- * 色阶：空格为背景色 #0A101C；液体为单一蓝色系，#BFDBFE(稀薄) → #1E3A8A(浓稠)。
- * 颜色随密度**连续加深**（对数曲线，DENSITY_DEEP 之上才到最深色）；
- * 蓝色阶段一律不透明，只有稀到发白（ALPHA_OPAQUE_FROM 以下）才按平方渐透，
- * 越稀越透，最后溶进画布背景（#0A101C）。
+ * 渲染管线：颜色看**密度**，不透明度看**质量** → ImageData 像素直写。
+ *   密度 = engine.renderDensity()：知道水块形状的引擎给 质量 / 水块面积（真正的密度），
+ *          其它引擎就是质量。一条刚越过格子边界的薄条（质量 0.05、密度 1）颜色和水体一样深，
+ *          被压实的格（密度 > 1）更深；淡出交给不透明度。
+ *   质量 → 不透明度：ALPHA_OPAQUE_FROM 之上不透明，之下按平方渐透，最后溶进背景（#0A101C）。
+ * 色阶：单一蓝色系，#BFDBFE(稀薄) → #1E3A8A(浓稠)，对数曲线，DENSITY_DEEP 之上才到最深色。
+ *
+ * 双线性渐变（GRADIENT）：每个像素在最近四个格心之间插值质量 m 和 m·ρ，
+ * 颜色取 ρ = (m·ρ)/m —— 按质量加权的密度。空格的 m = 0，不影响颜色，只让边缘渐透。
+ *
+ * 水块形状（SHOW_BLOCKS，引擎给出 renderBlocks() 时；默认关）：每格只画水块那个矩形，矩形外是空的。
+ * 轮廓由水块决定（像素按被矩形盖住的比例抗锯齿），渐变只管矩形**里面**的颜色。
+ * 相邻两格的矩形常常差一点贴不到共用的边，画出来中间夹着细缝 —— 所以默认用纯渐变。
  */
 
 import { RENDER_EMPTY_EPS, FluidEngine, CELL_WALL, CELL_SOURCE } from './engine';
@@ -47,7 +55,7 @@ function hslToRgb({ h, s, l }: HSL): [number, number, number] {
   else if (hp < 3) [r, g, b] = [0, c, x];
   else if (hp < 4) [r, g, b] = [0, x, c];
   else if (hp < 5) [r, g, b] = [x, 0, c];
-  else[r, g, b] = [c, 0, x];
+  else [r, g, b] = [c, 0, x];
   const m = l - c / 2;
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
@@ -65,7 +73,7 @@ const DENSITY_DEEP = 3.5;
 const DENSITY_KNEE = 0.5;
 const DENSITY_LOG = Math.log(1 + DENSITY_DEEP / DENSITY_KNEE);
 
-/** 质量 → 色阶参数 t ∈ [0,1]（连续、单调） */
+/** 密度 → 色阶参数 t ∈ [0,1]（连续、单调） */
 function densityLevel(m: number): number {
   return Math.min(1, Math.log(1 + m / DENSITY_KNEE) / DENSITY_LOG);
 }
@@ -74,7 +82,7 @@ function densityLevel(m: number): number {
 /** 达到完全不透明的密度：由此往上（蓝色阶段）都是不透明的 */
 const ALPHA_OPAQUE_FROM = 0.4;
 /** 最稀薄处的不透明度：几乎溶进背景 */
-const ALPHA_MIN = 0.01;
+const ALPHA_MIN = 0.05;
 /** 不透明度分级数（做成二维 LUT，热路径上不用每格做乘法） */
 const ALPHA_LEVELS = 256;
 
@@ -109,6 +117,15 @@ for (let n = 0; n < 256; n++) {
   LUT[n * 3 + 2] = bl;
 }
 
+/**
+ * 双线性渐变（一格的颜色向周围 8 格连续过渡）。
+ * 关掉就是每格一个颜色、格间硬边。
+ */
+const GRADIENT = true;
+
+/** 画出每格的水块形状（引擎支持时）。关掉（默认）就是纯渐变：颜色看密度、透明度看质量 */
+const SHOW_BLOCKS = false;
+
 const EMPTY_RGB: [number, number, number] = [0x0a, 0x10, 0x1c];
 const WALL_RGB: [number, number, number] = [0x64, 0x74, 0x8b];
 const WALL_EDGE_RGB: [number, number, number] = [0x41, 0x51, 0x66];
@@ -139,17 +156,31 @@ const WALL32 = pack(...WALL_RGB);
 const WALL_EDGE32 = pack(...WALL_EDGE_RGB);
 
 /**
- * 质量 → 像素 的一维 LUT（渐变渲染用）。
- * 渐变后每个**像素**都有自己的插值密度，不能再每像素算一次 log 和乘方 —— 预先量化查表。
- * 上界取 DENSITY_DEEP：之上颜色与不透明度都已饱和，不必再细分。
+ * 密度 → 色阶下标、质量 → 不透明度下标 的一维 LUT（渐变时每个像素都要查，不能每像素算 log 和乘方）。
+ * 像素颜色 = LUT32[RHO_IDX[量化的 ρ] + M_IDX[量化的 m]]。
+ * 上界：密度取 DENSITY_DEEP、质量取 ALPHA_OPAQUE_FROM —— 之上都已饱和，不必再细分。
  */
-const MASS_LUT_N = 1024;
-const MASS_LUT_MAX = DENSITY_DEEP;
-const MASS_LUT_SCALE = (MASS_LUT_N - 1) / MASS_LUT_MAX;
-const MASS32 = new Uint32Array(MASS_LUT_N);
-for (let n = 0; n < MASS_LUT_N; n++) {
-  const m = (n / (MASS_LUT_N - 1)) * MASS_LUT_MAX;
-  MASS32[n] = LUT32[Math.floor(densityLevel(m) * 255) * ALPHA_LEVELS + alphaLevel(m)];
+const RHO_N = 1024;
+const RHO_SCALE = (RHO_N - 1) / DENSITY_DEEP;
+const RHO_IDX = new Uint32Array(RHO_N);
+for (let n = 0; n < RHO_N; n++)
+  RHO_IDX[n] = Math.floor(densityLevel((n / (RHO_N - 1)) * DENSITY_DEEP) * 255) * ALPHA_LEVELS;
+const M_N = 1024;
+const M_SCALE = (M_N - 1) / ALPHA_OPAQUE_FROM;
+const M_IDX = new Uint16Array(M_N);
+for (let n = 0; n < M_N; n++) M_IDX[n] = alphaLevel((n / (M_N - 1)) * ALPHA_OPAQUE_FROM);
+
+/** 密度 → 色阶下标（已乘 ALPHA_LEVELS） */
+function rhoIndex(rho: number): number {
+  return RHO_IDX[rho >= DENSITY_DEEP ? RHO_N - 1 : rho > 0 ? (rho * RHO_SCALE) | 0 : 0];
+}
+
+/** (质量, 密度) → 像素颜色 */
+function pixelOf(m: number, rho: number): number {
+  if (m <= RENDER_EMPTY_EPS) return EMPTY32;
+  const ri = rho >= DENSITY_DEEP ? RHO_N - 1 : rho > 0 ? (rho * RHO_SCALE) | 0 : 0;
+  const mi = m >= ALPHA_OPAQUE_FROM ? M_N - 1 : (m * M_SCALE) | 0;
+  return LUT32[RHO_IDX[ri] + M_IDX[mi]];
 }
 
 /**
@@ -189,6 +220,7 @@ export function renderEngine(
   timeMs: number,
 ): void {
   const { w, h, mass, kind } = engine;
+  const rhoF = engine.renderDensity();
   const CELL = engine.cell; // 每格几个像素：由画布内部渲染尺寸反推，见 engine.ts
   const pw = w * CELL;
 
@@ -200,6 +232,96 @@ export function renderEngine(
 
   const { w: fw, neg: fneg } = fracFor(CELL);
   const HALF = CELL >> 1; // 偏左 / 偏上的那一半像素（CELL 为奇数时中间那列权重为 0，归哪半都一样）
+
+  // 3×3 邻域的九个采样：质量 m 与 m·ρ（插值后 ρ = (m·ρ)/m）
+  const sm = new Float64Array(9);
+  const sq = new Float64Array(9);
+  const sp = new Uint32Array(9);
+  const blocks = SHOW_BLOCKS ? engine.renderBlocks() : null;
+  // 每列 / 每行像素被水块盖住的比例（0..1）
+  const covX = new Float64Array(CELL);
+  const covY = new Float64Array(CELL);
+  const TOP = ALPHA_LEVELS - 1;
+
+  /** 取 3×3 邻域的 m、m·ρ；返回九个采样画出来是否同一个（不透明的）颜色 */
+  const sample = (x: number, y: number, mC: number, rC: number): boolean => {
+    let same = true;
+    for (let k = 0; k < 9; k++) {
+      const xx = x + (k % 3) - 1, yy = y + ((k / 3) | 0) - 1;
+      let m = mC, r = rC;
+      if (xx >= 0 && xx < w && yy >= 0 && yy < h) {
+        const q = yy * w + xx;
+        if (kind[q] !== CELL_WALL) {
+          m = mass[q];
+          r = rhoF[q];
+        }
+      }
+      sm[k] = m;
+      sq[k] = m * r;
+      sp[k] = m <= RENDER_EMPTY_EPS ? EMPTY32 : LUT32[rhoIndex(r) + TOP];
+      if (sp[k] !== sp[0]) same = false;
+    }
+    return same;
+  };
+
+  /**
+   * 水块模式下画一格：矩形 [x0, x1] × [y0, y1] 里是水，外面是空的。
+   * 颜色 = 密度（GRADIENT 时在矩形里按邻格插值），不透明度 = 像素被矩形盖住的比例（边缘抗锯齿）
+   */
+  const drawBlockCell = (i: number, x: number, y: number, p0: number): void => {
+    const mC = mass[i];
+    if (mC <= RENDER_EMPTY_EPS) {
+      for (let dy = 0; dy < CELL; dy++) px.fill(EMPTY32, p0 + dy * pw, p0 + dy * pw + CELL);
+      return;
+    }
+    const rC = rhoF[i];
+    const o = i * 4;
+    const x0 = blocks![o] * CELL, x1 = blocks![o + 1] * CELL, y0 = blocks![o + 2] * CELL, y1 = blocks![o + 3] * CELL;
+    const full = x0 <= 0 && x1 >= CELL && y0 <= 0 && y1 >= CELL;
+    const same = GRADIENT ? sample(x, y, mC, rC) : true;
+    const flat = LUT32[rhoIndex(rC) + TOP];
+    // 快路：整格都是水、颜色也处处一样 —— 水体内部
+    if (full && same) {
+      const c = GRADIENT ? sp[4] : flat;
+      for (let dy = 0; dy < CELL; dy++) px.fill(c, p0 + dy * pw, p0 + dy * pw + CELL);
+      return;
+    }
+    for (let d = 0; d < CELL; d++) {
+      covX[d] = Math.max(0, Math.min(d + 1, x1) - Math.max(d, x0));
+      covY[d] = Math.max(0, Math.min(d + 1, y1) - Math.max(d, y0));
+    }
+    for (let dy = 0; dy < CELL; dy++) {
+      const p = p0 + dy * pw;
+      const cy = covY[dy];
+      if (cy <= 0) {
+        px.fill(EMPTY32, p, p + CELL);
+        continue;
+      }
+      const wy = fw[dy];
+      const up = fneg[dy] === 1;
+      const kV = up ? 1 : 7;
+      const mY = sm[4] + wy * (sm[kV] - sm[4]);
+      const qY = sq[4] + wy * (sq[kV] - sq[4]);
+      for (let dx = 0; dx < CELL; dx++) {
+        const cov = covX[dx] * cy;
+        if (cov <= 0) {
+          px[p + dx] = EMPTY32;
+          continue;
+        }
+        let base: number;
+        if (GRADIENT && !same) {
+          const left = fneg[dx] === 1;
+          const kH = left ? 3 : 5;
+          const kHV = left ? (up ? 0 : 6) : up ? 2 : 8;
+          const wx = fw[dx];
+          const m = mY + wx * (sm[kH] - sm[4] + wy * (sm[kHV] - sm[kH] - sm[kV] + sm[4]));
+          const q = qY + wx * (sq[kH] - sq[4] + wy * (sq[kHV] - sq[kH] - sq[kV] + sq[4]));
+          base = rhoIndex(m > RENDER_EMPTY_EPS ? q / m : rC);
+        } else base = rhoIndex(rC);
+        px[p + dx] = LUT32[base + (cov >= 1 ? TOP : Math.round(cov * TOP))];
+      }
+    }
+  };
 
   for (let y = 0; y < h; y++) {
     const row = y * w;
@@ -222,42 +344,49 @@ export function renderEngine(
       }
 
       const mC = mass[i];
+      const rC = rhoF[i];
 
-      // 3×3 邻域采样：格心保留本格真实密度，格内像素在最近四个格心之间双线性插值，
-      // 于是一格的颜色向周围 8 格连续渐变（实测跨格色阶 ≤ 3.9/255）。
-      // 墙 / 越界按本格算，否则水贴着墙会渐隐出一道暗边；空格保留真实的 0，
-      // 水的边缘才会柔和地化进背景。水与墙之间仍是硬边 —— 那是应该的。
-      const xm = x > 0 ? x - 1 : x;
-      const xp = x < w - 1 ? x + 1 : x;
-      const ym = y > 0 ? y - 1 : y;
-      const yp = y < h - 1 ? y + 1 : y;
-      const rm = ym * w;
-      const rp = yp * w;
-      const sL = kind[row + xm] === CELL_WALL ? mC : mass[row + xm];
-      const sR = kind[row + xp] === CELL_WALL ? mC : mass[row + xp];
-      const sU = kind[rm + x] === CELL_WALL ? mC : mass[rm + x];
-      const sD = kind[rp + x] === CELL_WALL ? mC : mass[rp + x];
-      const sLU = kind[rm + xm] === CELL_WALL ? mC : mass[rm + xm];
-      const sRU = kind[rm + xp] === CELL_WALL ? mC : mass[rm + xp];
-      const sLD = kind[rp + xm] === CELL_WALL ? mC : mass[rp + xm];
-      const sRD = kind[rp + xp] === CELL_WALL ? mC : mass[rp + xp];
+      if (blocks) {
+        drawBlockCell(i, x, y, p0);
+        continue;
+      }
 
-      // 快路：整个邻域都是空的 → 本格不可能插出颜色，整块 fill（memset 级，远快于逐像素）。
-      // 空气往往占画面一大半，这一条把渐变的代价基本压回原来的水平。
-      if (
-        mC <= RENDER_EMPTY_EPS &&
-        sL <= RENDER_EMPTY_EPS &&
-        sR <= RENDER_EMPTY_EPS &&
-        sU <= RENDER_EMPTY_EPS &&
-        sD <= RENDER_EMPTY_EPS &&
-        sLU <= RENDER_EMPTY_EPS &&
-        sRU <= RENDER_EMPTY_EPS &&
-        sLD <= RENDER_EMPTY_EPS &&
-        sRD <= RENDER_EMPTY_EPS
-      ) {
+      // 渐变关掉时：整格一个颜色，格与格之间是硬边
+      if (!GRADIENT) {
+        const flat = pixelOf(mC, rC);
         for (let dy = 0; dy < CELL; dy++) {
           const p = p0 + dy * pw;
-          px.fill(EMPTY32, p, p + CELL);
+          px.fill(flat, p, p + CELL);
+        }
+        continue;
+      }
+
+      // 3×3 邻域采样：下标 0..8 = 左上 上 右上 / 左 中 右 / 左下 下 右下。
+      // 墙 / 越界按本格算，否则水贴着墙会渐隐出一道暗边；空格保留真实的 0，
+      // 水的边缘才会柔和地化进背景。水与墙之间仍是硬边 —— 那是应该的。
+      let same = true;
+      for (let k = 0; k < 9; k++) {
+        const xx = x + (k % 3) - 1, yy = y + ((k / 3) | 0) - 1;
+        let m = mC, r = rC;
+        if (xx >= 0 && xx < w && yy >= 0 && yy < h) {
+          const q = yy * w + xx;
+          if (kind[q] !== CELL_WALL) {
+            m = mass[q];
+            r = rhoF[q];
+          }
+        }
+        sm[k] = m;
+        sq[k] = m * r;
+        sp[k] = pixelOf(m, r); // 按格模式：透明度看质量
+        if (sp[k] !== sp[0]) same = false;
+      }
+
+      // 快路：九个采样画出来是同一个颜色 → 插值也只会落在同一个颜色上（色阶、透明度都单调），
+      // 整块 fill。空气、水体内部都走这条，占画面绝大部分
+      if (same) {
+        for (let dy = 0; dy < CELL; dy++) {
+          const p = p0 + dy * pw;
+          px.fill(sp[0], p, p + CELL);
         }
         continue;
       }
@@ -265,23 +394,22 @@ export function renderEngine(
       for (let dy = 0; dy < CELL; dy++) {
         const wy = fw[dy];
         const up = fneg[dy] === 1;
-        const mV = up ? sU : sD;
+        const kV = up ? 1 : 7; // 上 / 下
         const p = p0 + dy * pw;
-        // 双线性对固定的一组角点可整理成 m = base + wx·slope，内层只剩一次乘加。
+        // 双线性对固定的一组角点可整理成 v = base + wx·slope，内层只剩乘加。
         // 左右半格的横向邻格不同，所以拆成两段，省掉逐像素的分支。
-        const byY = mC + wy * (mV - mC);
+        const mY = sm[4] + wy * (sm[kV] - sm[4]);
+        const qY = sq[4] + wy * (sq[kV] - sq[4]);
         for (let half = 0; half < 2; half++) {
-          const mH = half === 0 ? sL : sR;
-          const mHV = half === 0 ? (up ? sLU : sLD) : up ? sRU : sRD;
-          const slope = mH - mC + wy * (mHV - mH - mV + mC);
+          const kH = half === 0 ? 3 : 5; // 左 / 右
+          const kHV = half === 0 ? (up ? 0 : 6) : up ? 2 : 8;
+          const mS = sm[kH] - sm[4] + wy * (sm[kHV] - sm[kH] - sm[kV] + sm[4]);
+          const qS = sq[kH] - sq[4] + wy * (sq[kHV] - sq[kH] - sq[kV] + sq[4]);
           const d0 = half === 0 ? 0 : HALF;
           const d1 = half === 0 ? HALF : CELL;
           for (let dx = d0; dx < d1; dx++) {
-            const m = byY + fw[dx] * slope;
-            px[p + dx] =
-              m <= RENDER_EMPTY_EPS
-                ? EMPTY32
-                : MASS32[m >= MASS_LUT_MAX ? MASS_LUT_N - 1 : (m * MASS_LUT_SCALE) | 0];
+            const m = mY + fw[dx] * mS;
+            px[p + dx] = m <= RENDER_EMPTY_EPS ? EMPTY32 : pixelOf(m, (qY + fw[dx] * qS) / m);
           }
         }
       }
@@ -332,6 +460,7 @@ export function makePreviewFrame(preset: PresetKey, w = 48, h = 48, steps = 600)
 
   const image = new ImageData(w, h);
   const data = image.data;
+  const rho = engine.renderDensity();
   for (let i = 0; i < w * h; i++) {
     let r: number;
     let g: number;
@@ -348,7 +477,7 @@ export function makePreviewFrame(preset: PresetKey, w = 48, h = 48, steps = 600)
         g = EMPTY_RGB[1];
         b = EMPTY_RGB[2];
       } else {
-        const t = Math.floor(densityLevel(m) * 255);
+        const t = Math.floor(densityLevel(rho[i]) * 255);
         r = LUT[t * 3];
         g = LUT[t * 3 + 1];
         b = LUT[t * 3 + 2];

@@ -48,6 +48,11 @@ export interface SimParams {
   elasticity: number;
   /** 粘稠度 0..0.95（阻碍流动的程度） */
   viscosity: number;
+  /**
+   * 法向（体积）粘性 0..0.95（形心追踪引擎用）：u 与左右的 u、v 与上下的 v 交换动量，耗掉压缩波。
+   * 侧向粘性只抹平层与层之间的滑动，管不到水池上下"弹"的那种波。0 = 关闭
+   */
+  bulkViscosity: number;
   /** 重力 g（每格对下方施加的恒定压力） */
   gravity: number;
   /** 固有膨胀系数 β ≥ 0：每格向四方向自发施压 m·β/4；0 = 仅重力自发向下 */
@@ -90,6 +95,7 @@ export const DEFAULT_PARAMS: SimParams = {
   // 水几乎不可压缩：k 取很大，ρ = k/(k+1) ≈ 0.999
   elasticity: 999,
   viscosity: 0.1,
+  bulkViscosity: 0.5,
   gravity: 1.0,
   // 试验引擎里是压力系数 c 的 1/100（见 engineSimple 的 C_SCALE）：2 → c = 200
   expansion: 2,
@@ -239,6 +245,23 @@ export class FluidEngine {
     this.pressureNext.fill(0);
     this.still.fill(1);
     this.stepCount = 0;
+  }
+
+  /**
+   * 渲染用的密度场（每格一个数，渲染器按它定颜色）。
+   * 这个引擎不知道水在格子里的哪一块，只能当成摊满整格：密度 = 质量。
+   * 知道水块形状的引擎（engineBlob）覆盖它，返回 质量 / 水块面积。
+   */
+  renderDensity(): ArrayLike<number> {
+    return this.mass;
+  }
+
+  /**
+   * 渲染用的水块形状：每格 4 个数 [x0, x1, y0, y1]（格内坐标 0..1），水只在这个矩形里。
+   * 这个引擎不知道水在格子里的哪一块，返回 null —— 渲染器退回按格渐变。
+   */
+  renderBlocks(): Float32Array | null {
+    return null;
   }
 
   totalMass(): number {
