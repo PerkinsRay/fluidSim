@@ -11,8 +11,15 @@ const scope = self as unknown as {
   onmessage: ((ev: MessageEvent<RenderIn>) => void) | null;
 };
 
-let src: { w: number; h: number; cell: number; mass: Float32Array; kind: Uint8Array; rho: Float32Array } | null = null;
-let px: Uint32Array | null = null;
+let src: {
+  w: number;
+  h: number;
+  cell: number;
+  mass: Float32Array<ArrayBufferLike>;
+  kind: Uint8Array<ArrayBufferLike>;
+  rho: Float32Array<ArrayBufferLike>;
+} | null = null;
+let px: Uint32Array<ArrayBufferLike> | null = null;
 let idx = 0,
   count = 1;
 

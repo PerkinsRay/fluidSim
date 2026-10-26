@@ -29,9 +29,7 @@ export default function Workbench() {
   const [gravity, setGravity] = useState(shared.sim.params.gravity);
   const [expansion, setExpansion] = useState(shared.sim.params.expansion);
   const [restDensity, setRestDensity] = useState(shared.sim.params.restDensity);
-  const [wallBounce, setWallBounce] = useState(shared.sim.params.wallBounce);
-  const [tension, setTension] = useState(shared.sim.params.tension);
-  const [thinPush, setThinPush] = useState(shared.sim.params.thinPush);
+  const [wallFriction, setWallFriction] = useState(shared.sim.params.wallFriction);
   const [speed, setSpeed] = useState(shared.speed);
   // 开场的水坝溃决在 createSimShared 里就发给 Worker 了
   const [preset, setPreset] = useState<PresetKey | ''>(currentPresetDefault());
@@ -115,9 +113,7 @@ export default function Workbench() {
       else if (key === 'bulkViscosity') setBulkViscosity(v);
       else if (key === 'expansion') setExpansion(v);
       else if (key === 'restDensity') setRestDensity(v);
-      else if (key === 'wallBounce') setWallBounce(v);
-      else if (key === 'tension') setTension(v);
-      else if (key === 'thinPush') setThinPush(v);
+      else if (key === 'wallFriction') setWallFriction(v);
       else setGravity(v);
     },
     [shared, changeSpeed],
@@ -189,7 +185,7 @@ export default function Workbench() {
               onTool={changeTool}
               brushSize={brushSize}
               onBrushSize={changeBrush}
-              params={{ viscosity, bulkViscosity, gravity, speed, expansion, restDensity, wallBounce, tension, thinPush }}
+              params={{ viscosity, bulkViscosity, gravity, speed, expansion, restDensity, wallFriction }}
               onParam={changeParam}
               grid={grid}
               onGrid={changeGrid}

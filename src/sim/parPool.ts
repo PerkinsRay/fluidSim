@@ -101,19 +101,19 @@ function ctrlBytes(): number {
   return Math.ceil((CTRL_INTS * 4) / 8) * 8 + CTRL_F64 * 8;
 }
 
-function views(ctrl: SharedArrayBuffer): { I: Int32Array; F: Float64Array } {
+function views(ctrl: SharedArrayBuffer): { I: Int32Array<ArrayBufferLike>; F: Float64Array<ArrayBufferLike> } {
   const off = Math.ceil((CTRL_INTS * 4) / 8) * 8;
   return { I: new Int32Array(ctrl, 0, CTRL_INTS), F: new Float64Array(ctrl, off, CTRL_F64) };
 }
 
-function readCtx(F: Float64Array): StepCtx {
+function readCtx(F: Float64Array<ArrayBufferLike>): StepCtx {
   return {
     dt: F[F_CTX], m0: F[F_CTX + 1], c: F[F_CTX + 2], g: F[F_CTX + 3], vCap: F[F_CTX + 4],
     k1: F[F_CTX + 5], kv: F[F_CTX + 6], kw: F[F_CTX + 7], kn: F[F_CTX + 8],
   };
 }
 
-function writeCtx(F: Float64Array, x: StepCtx): void {
+function writeCtx(F: Float64Array<ArrayBufferLike>, x: StepCtx): void {
   F[F_CTX] = x.dt; F[F_CTX + 1] = x.m0; F[F_CTX + 2] = x.c; F[F_CTX + 3] = x.g; F[F_CTX + 4] = x.vCap;
   F[F_CTX + 5] = x.k1; F[F_CTX + 6] = x.kv; F[F_CTX + 7] = x.kw; F[F_CTX + 8] = x.kn;
 }
@@ -124,7 +124,7 @@ function diagStart(e: FluidEngineBlob, j0: number): number {
 }
 
 /** 第 band 段做当前阶段（宿主和帮手共用） */
-function runPhase(e: FluidEngineBlob, I: Int32Array, F: Float64Array, band: number): void {
+function runPhase(e: FluidEngineBlob, I: Int32Array<ArrayBufferLike>, F: Float64Array<ArrayBufferLike>, band: number): void {
   const j0 = I[C_BANDS + band],
     j1 = I[C_BANDS + band + 1];
   if (j1 <= j0) return;
@@ -194,8 +194,8 @@ export function helperLoop(m: ParInit): void {
 export class ParPool {
   readonly engine: FluidEngineBlob;
   readonly threads: number;
-  private readonly I: Int32Array;
-  private readonly F: Float64Array;
+  private readonly I: Int32Array<ArrayBufferLike>;
+  private readonly F: Float64Array<ArrayBufferLike>;
   private readonly workers: Worker[] = [];
   private readonly weights: Float64Array;
   private readonly H: number;

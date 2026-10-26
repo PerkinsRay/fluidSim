@@ -16,7 +16,7 @@
  *
  * 和 Python 原型的差别：
  *   - 支持格内墙（CELL_WALL）与水源（CELL_SOURCE）；水块碰墙被挡住；
- *   - 侧向粘性（params.viscosity）：u 只和上下的 u、v 只和左右的 v 交换；墙摩擦 wallFriction 同理；
+ *   - 侧向粘性（params.viscosity）：u 只和上下的 u、v 只和左右的 v 交换；墙摩擦 params.wallFriction 同理；
  *   - 斜着落进对角格的那一小块水，动量沿对角直接搬（8 方向平流，见第 3.4 步）；
  *   - 法向粘性 params.bulkViscosity：耗掉侧向粘性管不到的压缩波，水才能静下来；
  *   - 辛欧拉：先加力、再用新速度挪水（显式欧拉会满屏棋盘格）；
@@ -123,8 +123,11 @@ function makeMem(w: number, h: number, buf?: SharedArrayBuffer): any {
   const out: Record<string, unknown> = {};
   let off = 0;
   for (const [name, k, len] of memSpec(w, h)) {
-    const C = k === "f64" ? Float64Array : k === "f32" ? Float32Array : k === "i32" ? Int32Array : Uint8Array;
-    out[name] = buf ? new C(buf, off, len) : new C(len);
+    // 逐个类型调构造函数（不写成"先挑出构造函数再 new"：TS 5.7+ 里几个构造函数的联合类型不收 SharedArrayBuffer）
+    const b: ArrayBufferLike = buf ?? new ArrayBuffer(Math.ceil((len * BYTES[k]) / 8) * 8);
+    const o = buf ? off : 0;
+    out[name] =
+      k === "f64" ? new Float64Array(b, o, len) : k === "f32" ? new Float32Array(b, o, len) : k === "i32" ? new Int32Array(b, o, len) : new Uint8Array(b, o, len);
     off += Math.ceil((len * BYTES[k]) / 8) * 8;
   }
   return out;
@@ -132,8 +135,6 @@ function makeMem(w: number, h: number, buf?: SharedArrayBuffer): any {
 
 export class FluidEngineBlob extends FluidEngine {
   timeStep = 0.01;
-  /** 墙的摩擦 0..0.95（同粘性的标定）：贴墙的面每步把一部分平行动量交给墙。0 = 光滑墙 */
-  wallFriction = 0.01;
   /**
    * 内聚 k1 ≥ 0：被拉稀的水（密度 ρ < m₀）往回拉，P = max(−k1·ρ, c·(ρ − m₀))。0 = 关闭。
    * 注意：0 < ρ < ρ* 这一段 P 随 ρ 下降（越稀压力越高）—— 反扩散。没有表面张力项时
@@ -142,8 +143,8 @@ export class FluidEngineBlob extends FluidEngine {
   cohesion = 0;
 
   /** 面速度（跨步保留） */
-  readonly u: Float64Array;
-  readonly v: Float64Array;
+  readonly u: Float64Array<ArrayBufferLike>;
+  readonly v: Float64Array<ArrayBufferLike>;
 
   /**
    * 每格的水块（格内坐标，中心相对格心）：
@@ -151,50 +152,50 @@ export class FluidEngineBlob extends FluidEngine {
    *   gX, gY 中心偏移 ∈ [−0.5, 0.5]（存偏移而不存 0..1：贴左 / 贴右两侧精度相同，镜像不被舍入打破）
    *   gW, gH 宽、高
    */
-  private gA: Float64Array;
-  private gX: Float64Array;
-  private gY: Float64Array;
-  private gW: Float64Array;
-  private gH: Float64Array;
+  private gA: Float64Array<ArrayBufferLike>;
+  private gX: Float64Array<ArrayBufferLike>;
+  private gY: Float64Array<ArrayBufferLike>;
+  private gW: Float64Array<ArrayBufferLike>;
+  private gH: Float64Array<ArrayBufferLike>;
   /** 拟合水块时的质量：与当前质量不同 ⇒ 这一格被画笔 / 水源 / 橡皮改过，水块重置 */
-  private geoMass: Float32Array;
+  private geoMass: Float32Array<ArrayBufferLike>;
 
   // 工作区
-  private p: Float64Array;
-  private Pu: Float64Array;
-  private Pv: Float64Array;
-  private dPu: Float64Array;
-  private dPv: Float64Array;
-  private Fu: Float64Array;
-  private Fv: Float64Array;
-  private newm: Float64Array;
+  private p: Float64Array<ArrayBufferLike>;
+  private Pu: Float64Array<ArrayBufferLike>;
+  private Pv: Float64Array<ArrayBufferLike>;
+  private dPu: Float64Array<ArrayBufferLike>;
+  private dPv: Float64Array<ArrayBufferLike>;
+  private Fu: Float64Array<ArrayBufferLike>;
+  private Fv: Float64Array<ArrayBufferLike>;
+  private newm: Float64Array<ArrayBufferLike>;
   /** 每格收到的水块的矩，按**质量**加权：[Σd, Σd·ξ, Σd·η, Σd·ξ², Σd·η², Σd·ρ]（相对格心），见第 4 步 */
-  private acc: Float64Array;
+  private acc: Float64Array<ArrayBufferLike>;
   /**
    * 斜着落进对角格的每一小块：(源格, 目标格, d) 依次排开（见第 3.4 步）。
    * 一开始就按最坏情况分配（一块水最多盖住 3×3 格，四个角上各一块斜着的：每格 4 组），不中途扩容 ——
    * 扩容会换掉数组，正在跑的优化代码因此作废重编，256×256 时那一步要卡 50 ms
    */
-  private diagBuf: Float64Array;
+  private diagBuf: Float64Array<ArrayBufferLike>;
   /** 水源格列表（墙 / 水源变了才重算） */
   private srcList = new Int32Array(0);
   /** 这一步质量被外部改过的格（画笔 / 水源 / 橡皮） */
   private touched = new Int32Array(0);
   /** 速度封顶用的旧速度副本 */
-  private capU: Float64Array;
-  private capV: Float64Array;
+  private capU: Float64Array<ArrayBufferLike>;
+  private capV: Float64Array<ArrayBufferLike>;
   /**
    * 每步预先算好：面的种类、面质量 m_e。
    *   oU / oV：0 = 死面（两侧都是墙 / 域外，没有水）；1 = 两侧都是水格；
    *            2 = 墙在下标小的那侧（左 / 上），水在另一侧；3 = 墙在下标大的那侧（右 / 下）
    *   墙面（2、3）也存速度 —— 它管贴墙那半格水，面质量 = 那一格的一半（墙外没有水）
    */
-  private oU: Uint8Array;
-  private oV: Uint8Array;
-  private mU: Float64Array;
-  private mV: Float64Array;
+  private oU: Uint8Array<ArrayBufferLike>;
+  private oV: Uint8Array<ArrayBufferLike>;
+  private mU: Float64Array<ArrayBufferLike>;
+  private mV: Float64Array<ArrayBufferLike>;
   /** 上次算 oU / oV 时的格类型：墙没变就不重算 */
-  private kindSeen: Uint8Array;
+  private kindSeen: Uint8Array<ArrayBufferLike>;
   /** 格的 8 个邻格都在域内、都不是墙（墙变了才重算）：满格搬运走快路，不用查墙、不用逐块量面积 */
   private open8: Uint8Array;
   /** mU / mV 是按当前质量算的（上一步末尾算好；外部直接改 mass 后 nT > 0 会重算） */
@@ -204,8 +205,8 @@ export class FluidEngineBlob extends FluidEngine {
    *   lU[a]：u[a] 与下面的 u[a + W + 1] 共用一列水格（可以交换）；1 位 = 可交换，2 位 = 上面是墙，4 位 = 下面是墙
    *   lV[a]：v[a] 与右边的 v[a + 1] 同理；1 = 可交换，2 = 左边是墙，4 = 右边是墙
    */
-  private lU: Uint8Array;
-  private lV: Uint8Array;
+  private lU: Uint8Array<ArrayBufferLike>;
+  private lV: Uint8Array<ArrayBufferLike>;
   /** 墙面列表（墙变了才重算）：wU / wV 是面的下标，cU / cV 是贴着它的那一格（wallClamp 只扫这些面） */
   private wU = new Int32Array(0);
   private cU = new Int32Array(0);
@@ -217,18 +218,18 @@ export class FluidEngineBlob extends FluidEngine {
    * 这一步要算的范围（每行一段，见 advance 开头）：xLo..xHi 格、uLo..uHi 竖直面（按格行）、
    * vLo..vHi 水平面（按面行 0..H）；wLo / wHi 是每行有水的格的范围（临时）。空 = lo > hi
    */
-  private xLo: Int32Array;
-  private xHi: Int32Array;
-  private uLo: Int32Array;
-  private uHi: Int32Array;
-  private vLo: Int32Array;
-  private vHi: Int32Array;
-  private wLo: Int32Array;
-  private wHi: Int32Array;
+  private xLo: Int32Array<ArrayBufferLike>;
+  private xHi: Int32Array<ArrayBufferLike>;
+  private uLo: Int32Array<ArrayBufferLike>;
+  private uHi: Int32Array<ArrayBufferLike>;
+  private vLo: Int32Array<ArrayBufferLike>;
+  private vHi: Int32Array<ArrayBufferLike>;
+  private wLo: Int32Array<ArrayBufferLike>;
+  private wHi: Int32Array<ArrayBufferLike>;
   /** renderDensity 的输出 */
-  private rho: Float32Array;
+  private rho: Float32Array<ArrayBufferLike>;
   /** renderBlocks 的输出：每格 [x0, x1, y0, y1] */
-  private blk: Float32Array;
+  private blk: Float32Array<ArrayBufferLike>;
 
   /**
    * shared：多线程时所有线程共用的状态放在这一块共享内存里（大小见 sharedBytes，布局见 memSpec）。
@@ -949,7 +950,7 @@ export class FluidEngineBlob extends FluidEngine {
       this.faceMassOk = true;
     }
     const kv = Math.min(VISC_SCALE * Math.min(Math.max(viscosity, 0), 0.95) * dt, VISC_K_MAX);
-    const kw = Math.min(VISC_SCALE * Math.min(Math.max(this.wallFriction, 0), 0.95) * dt, VISC_K_MAX);
+    const kw = Math.min(VISC_SCALE * Math.min(Math.max(this.params.wallFriction, 0), 0.95) * dt, VISC_K_MAX);
     const kn = Math.min(VISC_SCALE * Math.min(Math.max(bulkViscosity, 0), 0.95) * dt, VISC_K_MAX);
     return { dt, m0, c, g, vCap, k1: Math.max(this.cohesion, 0), kv, kw, kn };
   }

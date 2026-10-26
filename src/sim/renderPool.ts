@@ -31,7 +31,10 @@ export interface RenderOut {
 export const RENDER_CHUNK = 4;
 
 /** 共享输入：质量（f32）、密度（f32）、格类型（u8），n 格 */
-export function inputViews(buf: SharedArrayBuffer, n: number): { mass: Float32Array; rho: Float32Array; kind: Uint8Array } {
+export function inputViews(
+  buf: SharedArrayBuffer,
+  n: number,
+): { mass: Float32Array<ArrayBufferLike>; rho: Float32Array<ArrayBufferLike>; kind: Uint8Array<ArrayBufferLike> } {
   return { mass: new Float32Array(buf, 0, n), rho: new Float32Array(buf, n * 4, n), kind: new Uint8Array(buf, n * 8, n) };
 }
 
@@ -49,8 +52,8 @@ export interface FrameSource extends RowSource {
 export class RenderPool {
   readonly count: number;
   /** 画好的像素（整张图，w·cell × h·cell 个 32 位像素；主线程拷进画布） */
-  readonly pixels: Uint8ClampedArray;
-  private readonly input: { mass: Float32Array; rho: Float32Array; kind: Uint8Array };
+  readonly pixels: Uint8ClampedArray<ArrayBufferLike>;
+  private readonly input: { mass: Float32Array<ArrayBufferLike>; rho: Float32Array<ArrayBufferLike>; kind: Uint8Array<ArrayBufferLike> };
   private readonly workers: Worker[] = [];
   private no = 0;
   /** 这一帧还有几个 Worker 没画完（0 = 没在画 / 画完了） */
@@ -109,9 +112,9 @@ export class RenderPool {
 
   /** 交给渲染 Worker 画这一帧（拷数据进共享输入，马上返回）。调用前要 !busy */
   start(src: FrameSource): void {
-    this.input.mass.set(src.mass as Float32Array);
-    this.input.rho.set(src.renderDensity() as Float32Array);
-    this.input.kind.set(src.kind as Uint8Array);
+    this.input.mass.set(src.mass);
+    this.input.rho.set(src.renderDensity());
+    this.input.kind.set(src.kind);
     this.no++;
     this.left = this.count;
     this.drawStart = performance.now();

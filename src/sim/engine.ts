@@ -49,6 +49,10 @@ export interface SimParams {
   /** 粘稠度 0..0.95（阻碍流动的程度） */
   viscosity: number;
   /**
+   * 墙的摩擦 0..0.95（形心追踪引擎用，同粘性的标定）：贴墙的面每步把一部分平行动量交给墙。0 = 光滑墙
+   */
+  wallFriction: number;
+  /**
    * 法向（体积）粘性 0..0.95（形心追踪引擎用）：u 与左右的 u、v 与上下的 v 交换动量，耗掉压缩波。
    * 侧向粘性只抹平层与层之间的滑动，管不到水池上下"弹"的那种波。0 = 关闭
    */
@@ -96,6 +100,7 @@ export const DEFAULT_PARAMS: SimParams = {
   elasticity: 999,
   viscosity: 0.1,
   bulkViscosity: 0.5,
+  wallFriction: 0.01,
   gravity: 1.0,
   // 试验引擎里是压力系数 c 的 1/100（见 engineSimple 的 C_SCALE）：2 → c = 200
   expansion: 2,
@@ -190,9 +195,9 @@ export class FluidEngine {
   readonly cell: number;
 
   /** 液体质量场 */
-  readonly mass: Float32Array;
+  readonly mass: Float32Array<ArrayBufferLike>;
   /** 格子类型：CELL_FLUID（可装水）/ CELL_WALL（固体墙）/ CELL_SOURCE（每步注水的格，本身也可装水） */
-  readonly kind: Uint8Array;
+  readonly kind: Uint8Array<ArrayBufferLike>;
   /** 四方向压力缓存 [上, 下, 左, 右] × 每格（规则1/3 的输出） */
   readonly pressure: Float32Array;
 
@@ -220,7 +225,7 @@ export class FluidEngine {
   relaxation = 0.5;
 
   /** mem：质量、格类型用给定的数组（多线程时它们在共享内存里，见 engineBlob 的 carve） */
-  constructor(w: number, h: number, mem?: { mass: Float32Array; kind: Uint8Array }) {
+  constructor(w: number, h: number, mem?: { mass: Float32Array<ArrayBufferLike>; kind: Uint8Array<ArrayBufferLike> }) {
     this.w = w;
     this.h = h;
     this.cell = cellSizeFor(w, h);

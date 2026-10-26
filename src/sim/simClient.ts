@@ -18,10 +18,11 @@ export class EngineView implements RenderSource {
   w = 0;
   h = 0;
   cell = 1;
-  mass = new Float32Array(0);
-  kind = new Uint8Array(0);
-  rho = new Float32Array(0);
-  blocks: Float32Array | null = null;
+  // 类型写宽（ArrayBufferLike）：帧里的数组是随消息转移过来的，TS 5.7+ 区分 ArrayBuffer / SharedArrayBuffer 底的数组
+  mass: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  kind: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  rho: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  blocks: Float32Array<ArrayBufferLike> | null = null;
   steps = 0;
   totalMass = 0;
   floor = 0;

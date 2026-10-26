@@ -14,9 +14,7 @@ export interface ParamValues {
   speed: number
   expansion: number
   restDensity: number
-  wallBounce: number
-  tension: number
-  thinPush: number
+  wallFriction: number
 }
 
 export type ParamKey = keyof ParamValues
@@ -145,37 +143,15 @@ export default function ControlPanel({
             tooltip="低于这个密度的液体不施反作用力（只保留自重与固有膨胀）——稀薄的水失去支撑，会自由落回水体而不是挂在液面上方成雾。0 = 关闭（按现在的行为）"
           />
           <ParamSlider
-            label="撞墙反弹"
-            en="Wall Bounce"
+            label="墙摩擦"
+            en="Wall Friction"
             min={0}
-            max={1}
-            step={0.05}
-            value={params.wallBounce}
-            onChange={(v) => onParam('wallBounce', v)}
+            max={0.95}
+            step={0.01}
+            value={params.wallFriction}
+            onChange={(v) => onParam('wallFriction', v)}
             format={(v) => v.toFixed(2)}
-            tooltip="墙只给力、不改速度：水冲向墙时，贴墙那一格多一份冲击压力 2·系数·m·v²，把水减速、推回去、推向两侧。同时决定墙有多滑：粘性里墙被当作速度 0 的水，拖拽 × (1 − 系数)——0 = 墙完全不滑，晃动被墙磨停但撞墙弹不回来；1 = 光滑墙，弹得最远、晃得更久。静止的水不受影响"
-          />
-          <ParamSlider
-            label="稀相推力"
-            en="Thin Push"
-            min={0}
-            max={1}
-            step={0.05}
-            value={params.thinPush}
-            onChange={(v) => onParam('thinPush', v)}
-            format={(v) => v.toFixed(2)}
-            tooltip="双井势 u < 0.5 的那一半（u = m / 静止密度，强度 = 系数 × 20）：不到半满的水压力为正、往外推。大了下落的水会被拉稀、散成雾。0 = 关闭。静止密度为 0 时不起作用"
-          />
-          <ParamSlider
-            label="内聚拉力"
-            en="Tension"
-            min={0}
-            max={1}
-            step={0.05}
-            value={params.tension}
-            onChange={(v) => onParam('tension', v)}
-            format={(v) => v.toFixed(2)}
-            tooltip="双井势 u > 0.5 的那一半（u = m / 静止密度，强度 = 系数 × 20）：超过半满、没到满格的水压力为负、往回拉。大了水会挂在天花板上，薄层会分成一格满一格空。0 = 关闭。静止密度为 0 时不起作用"
+            tooltip="贴着墙流的水每步把一部分平行于墙的速度交给墙（墙当成速度 0、质量无穷大的水，和粘稠度同一个标定）。0 = 光滑墙，水贴着墙滑得最远；越大贴墙的水越慢、越快停下。只管沿墙的方向，不影响撞墙"
           />
           <ParamSlider
             label="模拟速度"
