@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
-import { renderEngine } from '@/sim/render'
-import { applyBrush, floorMass } from '@/sim/controller'
+import { renderEngine, drawSources } from '@/sim/render'
+import { RenderPool, renderPoolAvailable } from '@/sim/renderPool'
+import { applyBrush } from '@/sim/controller'
 import type { SimShared, SimStats, Tool } from '@/sim/controller'
 import type { CellProbe } from '@/sim/engineBlob'
 import { cn } from '@/lib/utils'
@@ -12,14 +13,6 @@ const TOOL_RING: Record<Tool, string> = {
   eraser: '#FB7185',
   source: '#34D399',
 }
-
-/**
- * 每帧的模拟步数上限——**它才是"画面动得多快"的旋钮**：一步最多推进一格，所以每帧几步就是
- * 每帧走几格。8 格画布配 dt=0.01 时，一次自由落体（t=√(2h/g)≈4）约 50 帧 ≈ 0.8 秒落地。
- * 速度滑杆缩放它（0.25× → 2 步），时间预算只作兜底（模拟变贵时自动让步，保 60fps）。
- */
-const FRAME_MS = 1000 / 60;
-const MAX_STEPS_PER_FRAME = 8;
 
 /** 悬停读数（调试）：一格的质量 / 压力 / 四条边的压力差与流速 */
 function formatProbe(pr: CellProbe | null): string {
@@ -38,6 +31,9 @@ function formatProbe(pr: CellProbe | null): string {
 
 /**
  * 画布本体 + 画刷指示环 + 渲染循环。
+ * 模拟在 Web Worker 里一帧一帧地算（每帧 8 步 × 速度，见 simHost.ts），和这里用两份缓冲交接：
+ * 这里画第 N 帧时 Worker 算第 N+1 帧；谁快谁等 —— 模拟算完了下一帧但这边还没画完，模拟等；
+ * 这边要画了但下一帧还没算完，这边等（这次刷新不画）。
  * 渲染循环只依赖共享对象（ref），不随 React 状态重建。
  */
 export default function SimulationCanvas({
@@ -51,7 +47,7 @@ export default function SimulationCanvas({
   onFirstInteract: () => void
   showHint: boolean
 }) {
-  const engine = shared.engine;
+  const view = shared.sim.view;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ringRef = useRef<HTMLCanvasElement>(null);
   const paintingRef = useRef(false);
@@ -71,69 +67,94 @@ export default function SimulationCanvas({
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const image = ctx.createImageData(engine.pixelWidth, engine.pixelHeight);
+    const sim = shared.sim;
+    const image = ctx.createImageData(view.pixelWidth, view.pixelHeight);
+    // 多线程画画面（见 renderPool.ts）：页面跨源隔离时开几个渲染 Worker 一起画；不行就主线程自己画
+    const rCount = renderPoolAvailable() ? sim.renderThreads : 0;
+    const pool = rCount > 0 ? new RenderPool(view.w, view.h, view.cell, rCount) : null;
+    /** 交给渲染 Worker 正在画的那一帧（画完才拷进画布、才还缓冲） */
+    let inRender = false;
+    let rStart = 0;
+    /** 拷进画布 + 水源圆点 */
+    const present = (now: number) => {
+      image.data.set(pool!.pixels);
+      ctx.putImageData(image, 0, 0);
+      drawSources(view, ctx, now);
+    };
 
     let raf = 0;
     let frames = 0;
     let windowStart = performance.now();
-    let renderMs = 0; // 上一帧渲染耗时：从模拟预算里扣掉，保证渲染还是 60fps
+    let probeKey = '';
+    /** 画一帧（renderEngine，含 putImageData）的耗时，滑动平均 */
+    let renderMs = 0;
 
     const loop = (now: number) => {
-      // 模拟推进：每帧固定几步（速度滑杆缩放），时间预算只兜底保 60fps
-      if (shared.running) {
-        const maxSteps = Math.max(
-          1,
-          Math.round(MAX_STEPS_PER_FRAME * Math.min(shared.speed, 1)),
-        );
-        const deadline = now + FRAME_MS - renderMs;
-        let steps = 0;
-        do {
-          engine.step();
-          steps++;
-        } while (steps < maxSteps && performance.now() < deadline);
+      // 下一帧算好了就画（按顺序、不跳帧）；还没算好就这次不画、等。画完还回去，Worker 才能用这份缓冲算再下一帧。
+      // 渲染 Worker 在画的时候：等它画完（这次刷新看一眼，没画完就下次再看），拷进画布，再还缓冲、取下一帧
+      let drew = false;
+      if (inRender && pool!.done()) {
+        if (pool!.usable) present(now);
+        else renderEngine(view, ctx, image, now); // 渲染线程坏了：这一帧主线程自己画
+        renderMs += 0.1 * (performance.now() - rStart - renderMs);
+        inRender = false;
+        drew = true;
+        sim.ack();
       }
-
-      if (shared.running || shared.needsRedraw) {
+      if (!inRender && sim.takeFrame()) {
         const t0 = performance.now();
-        renderEngine(engine, ctx, image, now);
-        renderMs = performance.now() - t0;
-        shared.needsRedraw = false;
+        if (pool && pool.usable) {
+          pool.start(view);
+          rStart = t0;
+          inRender = true;
+        } else {
+          renderEngine(view, ctx, image, now);
+          renderMs += 0.1 * (performance.now() - t0 - renderMs);
+          drew = true;
+          sim.ack();
+        }
       }
+      // FPS 数的是画面真正更新的次数；暂停时画面不变，按刷新次数算（不然一暂停就是 0）
+      if (drew || !shared.running) frames++;
 
-      // 悬停读数（调试）：鼠标指到哪一格就读哪一格
+      // 悬停读数（调试）：鼠标指到哪一格，就让 Worker 在每一帧里带上那一格的读数
       const readout = readoutRef.current;
       if (readout) {
         const pt = pointerRef.current;
-        let text = '';
+        let gx = -1,
+          gy = -1;
         if (pt && pt.inside) {
           const rect = canvas.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
-            const gx = Math.floor(((pt.x - rect.left) / rect.width) * engine.w);
-            const gy = Math.floor(((pt.y - rect.top) / rect.height) * engine.h);
-            text = formatProbe(engine.probe(gx, gy));
+            gx = Math.floor(((pt.x - rect.left) / rect.width) * view.w);
+            gy = Math.floor(((pt.y - rect.top) / rect.height) * view.h);
           }
         }
+        const key = `${gx},${gy}`;
+        if (key !== probeKey) {
+          probeKey = key;
+          sim.probeAt(gx, gy);
+        }
+        const text = gx >= 0 ? formatProbe(view.probe) : '';
         if (readout.textContent !== text) readout.textContent = text;
       }
 
-      // FPS 滑动窗口（500ms）
-      frames++;
+      // FPS 滑动窗口（500ms）：数的是真正画出来的帧
       if (now - windowStart >= 500) {
         const fps = Math.round((frames * 1000) / (now - windowStart));
         frames = 0;
         windowStart = now;
-        onStatsRef.current({
-          fps,
-          mass: engine.totalMass(),
-          steps: engine.stepCount,
-          floor: floorMass(engine),
-        });
+        onStatsRef.current({ fps, mass: view.totalMass, steps: view.steps, floor: view.floor, stepMs: view.stepMs, renderMs, threads: view.threads, why: view.why,
+          renderThreads: pool && pool.usable ? pool.count : 0 });
       }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [engine, shared]);
+    return () => {
+      cancelAnimationFrame(raf);
+      pool?.dispose();
+    };
+  }, [view, shared]);
 
   // ---- 指示环画布尺寸跟随显示尺寸 ----
   useEffect(() => {
@@ -155,7 +176,7 @@ export default function SimulationCanvas({
       if (!p || !p.inside) return;
       const rect = main.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      const cellCss = rect.width / engine.w;
+      const cellCss = rect.width / view.w;
       const cx = (p.x - rect.left) * dpr;
       const cy = (p.y - rect.top) * dpr;
       const r = (shared.brushSize / 2) * cellCss * dpr;
@@ -173,29 +194,30 @@ export default function SimulationCanvas({
     resize();
     ringDrawRef.current = drawRing;
     return () => ro.disconnect();
-  }, [engine, shared]);
+  }, [view, shared]);
 
   // ---- 绘制交互 ----
   const toGrid = (clientX: number, clientY: number) => {
     const rect = canvasRef.current!.getBoundingClientRect();
     return {
-      gx: ((clientX - rect.left) / rect.width) * engine.w - 0.5,
-      gy: ((clientY - rect.top) / rect.height) * engine.h - 0.5,
+      gx: ((clientX - rect.left) / rect.width) * view.w - 0.5,
+      gy: ((clientY - rect.top) / rect.height) * view.h - 0.5,
     };
   };
 
+  // 一段拖动每移动半格盖一次章；整段的落点一条消息发给 Worker
   const paintLine = (from: { x: number; y: number } | null, to: { x: number; y: number }, tool: Tool) => {
     if (!from) {
-      applyBrush(shared, to.x, to.y, tool);
+      applyBrush(shared, [to.x, to.y], tool);
       return;
     }
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const dist = Math.max(Math.abs(dx), Math.abs(dy));
     const n = Math.max(1, Math.ceil(dist * 2));
-    for (let s = 1; s <= n; s++) {
-      applyBrush(shared, from.x + (dx * s) / n, from.y + (dy * s) / n, tool);
-    }
+    const pts: number[] = [];
+    for (let s = 1; s <= n; s++) pts.push(from.x + (dx * s) / n, from.y + (dy * s) / n);
+    applyBrush(shared, pts, tool);
   };
 
   const markInteracted = () => {
@@ -209,9 +231,9 @@ export default function SimulationCanvas({
     <div className="relative">
       <canvas
         ref={canvasRef}
-        width={engine.pixelWidth}
-        height={engine.pixelHeight}
-        style={{ width: '100%', aspectRatio: `${engine.w} / ${engine.h}`, imageRendering: 'pixelated', touchAction: 'none' }}
+        width={view.pixelWidth}
+        height={view.pixelHeight}
+        style={{ width: '100%', aspectRatio: `${view.w} / ${view.h}`, imageRendering: 'pixelated', touchAction: 'none' }}
         className="block rounded-lg bg-canvasbg border border-subtle cursor-crosshair shadow-[inset_0_0_60px_rgba(34,211,238,0.04)]"
         onContextMenu={(e) => e.preventDefault()}
         onPointerDown={(e) => {
@@ -221,7 +243,7 @@ export default function SimulationCanvas({
           e.currentTarget.setPointerCapture(e.pointerId);
           const { gx, gy } = toGrid(e.clientX, e.clientY);
           const tool: Tool = e.button === 2 ? 'eraser' : shared.tool;
-          shared.engine.beginStroke(); // 新的一笔：每格重新可以加一次水
+          shared.sim.beginStroke(); // 新的一笔：每格重新可以加一次水
           paintLine(null, { x: gx, y: gy }, tool);
           lastCellRef.current = { x: gx, y: gy };
         }}

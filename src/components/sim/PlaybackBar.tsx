@@ -153,12 +153,12 @@ export default function PlaybackBar({
         <ParamSlider
           compact
           label="速度"
-          min={0.25}
-          max={1}
-          step={0.25}
+          min={0.125}
+          max={2}
+          step={0.125}
           value={speed}
           onChange={onSpeed}
-          format={(v) => `${v.toFixed(2).replace(/\.?0+$/, '')}×`}
+          format={(v) => `${v.toFixed(3).replace(/\.?0+$/, '')}×`}
         />
       </div>
     </div>

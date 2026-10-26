@@ -7,9 +7,8 @@ import ControlPanel from './ControlPanel'
 import type { ParamKey } from './ControlPanel'
 import PlaybackBar from './PlaybackBar'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { createSimShared, createEngine, floorMass, DEFAULT_GRID } from '@/sim/controller'
+import { createSimShared, currentPresetDefault, DEFAULT_GRID } from '@/sim/controller'
 import type { SimStats, Tool } from '@/sim/controller'
-import { applyPreset } from '@/sim/presets'
 import type { PresetKey } from '@/sim/presets'
 import { cn } from '@/lib/utils'
 
@@ -25,67 +24,55 @@ export default function Workbench() {
   const [tool, setTool] = useState<Tool>(shared.tool);
   const [brushSize, setBrushSize] = useState(shared.brushSize);
   const [grid, setGrid] = useState(DEFAULT_GRID);
-  const [viscosity, setViscosity] = useState(shared.engine.params.viscosity);
-  const [bulkViscosity, setBulkViscosity] = useState(shared.engine.params.bulkViscosity);
-  const [gravity, setGravity] = useState(shared.engine.params.gravity);
-  const [expansion, setExpansion] = useState(shared.engine.params.expansion);
-  const [restDensity, setRestDensity] = useState(shared.engine.params.restDensity);
-  const [wallBounce, setWallBounce] = useState(shared.engine.params.wallBounce);
-  const [tension, setTension] = useState(shared.engine.params.tension);
-  const [thinPush, setThinPush] = useState(shared.engine.params.thinPush);
+  const [viscosity, setViscosity] = useState(shared.sim.params.viscosity);
+  const [bulkViscosity, setBulkViscosity] = useState(shared.sim.params.bulkViscosity);
+  const [gravity, setGravity] = useState(shared.sim.params.gravity);
+  const [expansion, setExpansion] = useState(shared.sim.params.expansion);
+  const [restDensity, setRestDensity] = useState(shared.sim.params.restDensity);
+  const [wallBounce, setWallBounce] = useState(shared.sim.params.wallBounce);
+  const [tension, setTension] = useState(shared.sim.params.tension);
+  const [thinPush, setThinPush] = useState(shared.sim.params.thinPush);
   const [speed, setSpeed] = useState(shared.speed);
-  const [preset, setPreset] = useState<PresetKey | ''>('');
+  // 开场的水坝溃决在 createSimShared 里就发给 Worker 了
+  const [preset, setPreset] = useState<PresetKey | ''>(currentPresetDefault());
   const [stats, setStats] = useState<SimStats>(shared.stats);
   const [hintVisible, setHintVisible] = useState(true);
   const [loadNonce, setLoadNonce] = useState(0);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
-
-  // 初始载入演示场景（水坝溃决），打开即看到流动
-  useEffect(() => {
-    applyPreset(shared.engine, 'dam');
-    setPreset('dam');
-    shared.needsRedraw = true;
-  }, [shared]);
 
   const onStats = useCallback((s: SimStats) => setStats(s), []);
   const onFirstInteract = useCallback(() => setHintVisible(false), []);
 
   const togglePlay = useCallback(() => {
     shared.running = !shared.running;
+    shared.sim.run(shared.running);
     setRunning(shared.running);
   }, [shared]);
 
+  // 单步：Worker 走一步、发回新的一帧（统计随那一帧更新）
   const stepOnce = useCallback(() => {
-    shared.engine.step();
-    shared.needsRedraw = true;
-    onStats({ fps: stats.fps, mass: shared.engine.totalMass(), steps: shared.engine.stepCount, floor: floorMass(shared.engine) });
-  }, [shared, onStats, stats.fps]);
+    shared.sim.step();
+  }, [shared]);
 
   const doReset = useCallback(() => {
-    shared.engine.clear();
-    shared.needsRedraw = true;
+    shared.sim.clear();
     setPreset('blank');
     setLoadNonce((n) => n + 1);
   }, [shared]);
 
   const loadPreset = useCallback(
     (p: PresetKey) => {
-      applyPreset(shared.engine, p);
-      shared.needsRedraw = true;
+      shared.sim.preset(p);
       setPreset(p);
       setLoadNonce((n) => n + 1);
     },
     [shared],
   );
 
-  // 换网格分辨率：按当前参数与预设重建一台引擎；loadNonce 变化会让画布重挂载、渲染循环接到新引擎
+  // 换网格分辨率：Worker 按当前参数与预设重建一台引擎；loadNonce 变化会让画布按新尺寸重挂载
   const changeGrid = useCallback(
     (size: number) => {
-      const next = createEngine(size);
-      next.params = { ...shared.engine.params };
-      if (preset) applyPreset(next, preset);
-      shared.engine = next;
-      shared.needsRedraw = true;
+      shared.sim.init(size, preset);
       setGrid(size);
       setLoadNonce((n) => n + 1);
     },
@@ -111,6 +98,7 @@ export default function Workbench() {
   const changeSpeed = useCallback(
     (v: number) => {
       shared.speed = v;
+      shared.sim.speed(v);
       setSpeed(v);
     },
     [shared],
@@ -122,7 +110,7 @@ export default function Workbench() {
         changeSpeed(v);
         return;
       }
-      shared.engine.params[key] = v;
+      shared.sim.param(key, v);
       if (key === 'viscosity') setViscosity(v);
       else if (key === 'bulkViscosity') setBulkViscosity(v);
       else if (key === 'expansion') setExpansion(v);
@@ -131,7 +119,6 @@ export default function Workbench() {
       else if (key === 'tension') setTension(v);
       else if (key === 'thinPush') setThinPush(v);
       else setGravity(v);
-      if (!shared.running) shared.needsRedraw = true;
     },
     [shared, changeSpeed],
   );
@@ -231,6 +218,24 @@ export default function Workbench() {
                 </span>
                 <span className="flex items-center gap-2">
                   <StatChip label="FPS" value={String(stats.fps).padStart(2, '0')} dotClass="bg-emerald-400" />
+                  {/* 诊断：一步模拟 / 画一帧各多少 ms —— FPS 低时看是哪个慢 */}
+                  <StatChip label="模拟ms" value={stats.stepMs.toFixed(1)} dotClass="bg-violet-400" />
+                  <StatChip label="渲染ms" value={stats.renderMs.toFixed(1)} dotClass="bg-pink-400" />
+                  {/* 算模拟的线程数 / 逻辑核数（浏览器只给核数）；没用上多线程时悬停看原因 */}
+                  <span
+                    title={
+                      shared.sim.whyNoPar ||
+                      stats.why ||
+                      (stats.threads > 1 ? `${stats.threads} 个线程按行分段一起算模拟` : `打算用 ${shared.sim.simThreads} 个线程（帮手线程还在启动）`) +
+                        `；画画面：${stats.renderThreads > 0 ? `${stats.renderThreads} 个渲染线程` : '主线程自己画'}`
+                    }
+                  >
+                    <StatChip
+                      label="线程/核"
+                      value={`${stats.threads}+${stats.renderThreads}/${shared.sim.cores}`}
+                      dotClass={stats.threads > 1 ? 'bg-emerald-400' : 'bg-slate-500'}
+                    />
+                  </span>
                   <StatChip
                     label="物质"
                     value={String(Math.round(stats.mass))}

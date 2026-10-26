@@ -180,13 +180,13 @@ export default function ControlPanel({
           <ParamSlider
             label="模拟速度"
             en="Speed"
-            min={0.25}
-            max={1}
-            step={0.25}
+            min={0.125}
+            max={2}
+            step={0.125}
             value={params.speed}
             onChange={(v) => onParam('speed', v)}
-            format={(v) => `${v.toFixed(2).replace(/\.?0+$/, '')}×`}
-            tooltip="每帧模拟步数的倍率（基准 8 步/帧）：一步最多推进一格，所以这个值直接就是每帧走几格。1× = 每帧 8 步；调小 = 放慢观察。模拟变贵时会自动让步以保住 60fps（与播放条上的紧凑滑杆联动，同一状态）"
+            format={(v) => `${v.toFixed(3).replace(/\.?0+$/, '')}× · ${Math.round(8 * v)} 步`}
+            tooltip="每帧走几步 = 8 × 速度：0.125× = 1 步，1× = 8 步，2× = 16 步。模拟和画面一帧一帧锁步走、每一帧都画：网格大、一步很慢时，步数多画面就卡（帧数 ≈ 1000 / (步数 × 一步 ms)），调小速度画面就顺（与播放条上的紧凑滑杆联动，同一状态）"
           />
         </div>
       </section>

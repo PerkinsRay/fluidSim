@@ -94,8 +94,8 @@ export interface SimParams {
 export const DEFAULT_PARAMS: SimParams = {
   // 水几乎不可压缩：k 取很大，ρ = k/(k+1) ≈ 0.999
   elasticity: 999,
-  viscosity: 0.05,
-  bulkViscosity: 0.0,
+  viscosity: 0.1,
+  bulkViscosity: 0.5,
   gravity: 1.0,
   // 试验引擎里是压力系数 c 的 1/100（见 engineSimple 的 C_SCALE）：2 → c = 200
   expansion: 2,
@@ -115,7 +115,7 @@ export const RENDER_PX = 1024;
  * 由"画布内部渲染尺寸恒定"反推得来：网格越细，每格画的像素越少。显示尺寸本来就跟着面板走，
  * 把每格写死成固定像素只是白白多写几倍像素、再让浏览器缩回去（256×256 时是 16 MB/帧）。
  */
-function cellSizeFor(w: number, h: number): number {
+export function cellSizeFor(w: number, h: number): number {
   return Math.max(1, Math.floor(RENDER_PX / Math.max(w, h)));
 }
 
@@ -219,13 +219,14 @@ export class FluidEngine {
    */
   relaxation = 0.5;
 
-  constructor(w: number, h: number) {
+  /** mem：质量、格类型用给定的数组（多线程时它们在共享内存里，见 engineBlob 的 carve） */
+  constructor(w: number, h: number, mem?: { mass: Float32Array; kind: Uint8Array }) {
     this.w = w;
     this.h = h;
     this.cell = cellSizeFor(w, h);
     const n = w * h;
-    this.mass = new Float32Array(n);
-    this.kind = new Uint8Array(n); // 全部 CELL_FLUID
+    this.mass = mem ? mem.mass : new Float32Array(n);
+    this.kind = mem ? mem.kind : new Uint8Array(n); // 全部 CELL_FLUID
     this.pressure = new Float32Array(n * 4);
     this.flow = new Float32Array(n * 2);
     this.netP = new Float32Array(n);
