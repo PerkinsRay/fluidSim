@@ -120,7 +120,7 @@ export class SimClient {
       : !can
         ? !secure
           ? "不是安全来源（http:// 加 IP / 主机名）：浏览器忽略跨源隔离头，用不了共享内存。用 https://，或者用 localhost 打开（远程机器可以 ssh -L 3000:localhost:3000 转发）"
-          : "页面没有跨源隔离（服务器要发 COOP / COEP 响应头），用不了共享内存"
+          : "页面没有跨源隔离，用不了共享内存：服务器要发 COOP / COEP 响应头；静态托管（GitHub Pages 等）靠 coi-sw.js 这个 Service Worker 加头 —— 第一次打开要刷新一次，浏览器禁用了 Service Worker 时不行"
         : this.simThreads < 2
           ? forced === 1
             ? "网址里 ?threads=1"

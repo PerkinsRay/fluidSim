@@ -13,6 +13,31 @@
     />
   </head>
   <body>
+    <script>
+      // 跨源隔离（多线程模拟要它）：服务器没发 COOP / COEP 头时（GitHub Pages 等静态托管），
+      // 装一个 Service Worker 来给响应加上（见 public/coi-sw.js），装好后刷新一次。开发服务器自己会发，不用它。
+      // 只在安全来源（https:// / localhost）上能用；刷新过一次还不行就不再刷（避免死循环）
+      (function () {
+        if (window.crossOriginIsolated) {
+          sessionStorage.removeItem("coi-reload"); // 隔离成功：下次要是又不行（比如 Service Worker 被清掉），还能再刷一次
+          return;
+        }
+        if (!window.isSecureContext || !("serviceWorker" in navigator)) return;
+        var tried = sessionStorage.getItem("coi-reload");
+        navigator.serviceWorker.register("./coi-sw.js").then(function (reg) {
+          var reload = function () {
+            if (tried) return;
+            sessionStorage.setItem("coi-reload", "1");
+            location.reload();
+          };
+          if (reg.active && navigator.serviceWorker.controller) reload();
+          else
+            navigator.serviceWorker.addEventListener("controllerchange", reload);
+        }, function (err) {
+          console.warn("跨源隔离的 Service Worker 注册失败，多线程不可用：", err);
+        });
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
